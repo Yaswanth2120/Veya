@@ -692,4 +692,99 @@ struct RealTranscriptionIntegrationTests {
         await coordinator.endLiveSession(sessionID: session.id)
         await workerManager.stop()
     }
+
+    /// Section 16: the separated meeting-audio track's real lifecycle
+    /// through the actual Python worker/dispatcher — both `AudioCapturing`
+    /// instances are faked (no real ScreenCaptureKit/microphone hardware
+    /// available in this environment), but every RPC
+    /// (`transcription.start_meeting_audio`, `.meeting_audio_chunk`,
+    /// `.stop_meeting_audio`) is real.
+    @Test("the meeting-audio track starts and stops independently of the microphone track")
+    func meetingAudioTrackLifecycle() async throws {
+        var configuration = PythonWorkerConfiguration.resolveDefault()
+        configuration.readyTimeout = 5
+        configuration.rpcTimeout = 10
+        let workerManager = PythonWorkerManager(configuration: configuration)
+        let eventRouter = IPCEventRouter()
+        let micCapture = FakeAudioCapture()
+        let meetingCapture = FakeAudioCapture()
+        let permission = FakeMicrophonePermission(status: .authorized)
+        let coordinator = PythonIntelligenceCoordinator(
+            workerManager: workerManager,
+            eventRouter: eventRouter,
+            audioCapture: micCapture,
+            meetingAudioCapture: meetingCapture,
+            microphonePermission: permission
+        )
+
+        await workerManager.start()
+        #expect(workerManager.state == .ready)
+
+        let db = DatabaseManager.makeInMemory()
+        let session = Session.makeTestSession(title: "Meeting Audio Track Lifecycle")
+        try await SessionRepository(db: db).create(session)
+        let state = ConversationState(sessionID: session.id, repository: ConversationRepository(db: db))
+
+        await coordinator.beginLiveSession(state: state, session: session)
+        #expect(coordinator.drivingSource == .realTranscription)
+        #expect(coordinator.meetingAudioActive == false) // never starts on its own
+
+        let started = await coordinator.beginMeetingAudioCapture()
+        #expect(started == true)
+        #expect(coordinator.meetingAudioActive == true)
+        #expect(meetingCapture.startCallCount == 1)
+
+        // Starting it again is a harmless no-op, not a duplicate RPC error.
+        let startedAgain = await coordinator.beginMeetingAudioCapture()
+        #expect(startedAgain == true)
+        #expect(meetingCapture.startCallCount == 1)
+
+        await coordinator.endMeetingAudioCapture()
+        #expect(coordinator.meetingAudioActive == false)
+        #expect(meetingCapture.stopCallCount == 1)
+
+        // The microphone track must still be fully alive — stopping the
+        // meeting-audio track alone must never tear down the rest of the
+        // session.
+        #expect(coordinator.drivingSource == .realTranscription)
+        #expect(micCapture.stopCallCount == 0)
+
+        await coordinator.endLiveSession(sessionID: session.id)
+        #expect(micCapture.stopCallCount == 1)
+        await workerManager.stop()
+    }
+
+    /// A coordinator with no `meetingAudioCapture` configured at all
+    /// (every mode except "meeting audio + microphone") must never crash
+    /// or hang — `beginMeetingAudioCapture` is an honest, harmless no-op.
+    @Test("beginMeetingAudioCapture without a configured capability is a harmless no-op")
+    func meetingAudioWithoutCapabilityIsANoOp() async throws {
+        var configuration = PythonWorkerConfiguration.resolveDefault()
+        configuration.readyTimeout = 5
+        configuration.rpcTimeout = 10
+        let workerManager = PythonWorkerManager(configuration: configuration)
+        let eventRouter = IPCEventRouter()
+        let micCapture = FakeAudioCapture()
+        let permission = FakeMicrophonePermission(status: .authorized)
+        let coordinator = PythonIntelligenceCoordinator(
+            workerManager: workerManager,
+            eventRouter: eventRouter,
+            audioCapture: micCapture,
+            microphonePermission: permission
+        )
+
+        await workerManager.start()
+        let db = DatabaseManager.makeInMemory()
+        let session = Session.makeTestSession(title: "No Meeting Audio Capability")
+        try await SessionRepository(db: db).create(session)
+        let state = ConversationState(sessionID: session.id, repository: ConversationRepository(db: db))
+
+        await coordinator.beginLiveSession(state: state, session: session)
+        let started = await coordinator.beginMeetingAudioCapture()
+        #expect(started == false)
+        #expect(coordinator.meetingAudioActive == false)
+
+        await coordinator.endLiveSession(sessionID: session.id)
+        await workerManager.stop()
+    }
 }

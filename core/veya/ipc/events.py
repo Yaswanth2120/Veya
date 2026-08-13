@@ -20,8 +20,21 @@ def session_ended(session_id: str) -> dict:
     return {"session_id": session_id}
 
 
-def transcript_partial(session_id: str, text: str) -> dict:
-    return {"session_id": session_id, "text": text}
+# Section 16: which physical audio track a chunk/transcript came from —
+# "mixed" (single-track mode, the default, unchanged from every earlier
+# section) or the two separated-track sources. `speaker_role` is a pure,
+# static function of `source` alone (never the orchestrator's dynamic
+# "I'm answering" suppression state, which is a behavioral concept, not
+# an identity label) — "unknown" is an honest admission, not a guess.
+_SPEAKER_ROLE_BY_SOURCE = {"meeting_audio": "interviewer", "microphone": "user"}
+
+
+def _speaker_role_for_source(source: str) -> str:
+    return _SPEAKER_ROLE_BY_SOURCE.get(source, "unknown")
+
+
+def transcript_partial(session_id: str, text: str, source: str = "mixed") -> dict:
+    return {"session_id": session_id, "text": text, "source": source, "speaker_role": _speaker_role_for_source(source)}
 
 
 def transcript_final(
@@ -30,6 +43,7 @@ def transcript_final(
     text: str,
     started_at: float,
     ended_at: Optional[float],
+    source: str = "mixed",
 ) -> dict:
     return {
         "session_id": session_id,
@@ -38,6 +52,8 @@ def transcript_final(
         "started_at": started_at,
         "ended_at": ended_at,
         "is_final": True,
+        "source": source,
+        "speaker_role": _speaker_role_for_source(source),
     }
 
 
@@ -73,16 +89,22 @@ def answer_completed(
     sources: list[dict],
     sequence: int = 1,
     caveat: str = "",
+    answer_text: str = "",
 ) -> dict:
     """`sources` (Section 9): a list of structured references —
     `{"document_id", "file_name", "chunk_id", "excerpt"}` each — never
     plain strings. Must correspond to chunks actually retrieved for this
     answer; `[]` whenever no retrieval occurred or nothing met the
-    relevance threshold. Never fabricated."""
+    relevance threshold. Never fabricated.
+
+    `answer_text` (Section 16): the natural, speakable answer — the
+    primary content Swift renders; `talking_points` is optional
+    supporting detail, never the sole answer."""
     return {
         "session_id": session_id,
         "question_id": question_id,
         "question": question,
+        "answer_text": answer_text,
         "talking_points": talking_points,
         "sources": sources,
         "sequence": sequence,

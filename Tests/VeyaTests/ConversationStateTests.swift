@@ -19,7 +19,8 @@ struct ConversationStateTests {
             text: text,
             startedAt: 0,
             endedAt: 1,
-            isFinal: isFinal
+            isFinal: isFinal,
+            speakerRole: "unknown"
         )
     }
 

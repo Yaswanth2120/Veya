@@ -7,10 +7,12 @@ enum MockAnswerGenerator {
     static func answer(for question: DetectedQuestion, sessionID: UUID) -> CopilotAnswer {
         let lowercased = question.text.lowercased()
 
+        let answerText: String
         let talkingPoints: [String]
         let sources: [String]
 
         if lowercased.contains("six weeks") || lowercased.contains("migration") {
+            answerText = "The migration took six weeks because the authentication service was a hard dependency everything else waited on, so we rolled it out in stages while keeping backward compatibility the whole way through."
             talkingPoints = [
                 "Authentication service was the hard dependency everything else waited on",
                 "Rolled out in stages, not a single cutover",
@@ -19,6 +21,7 @@ enum MockAnswerGenerator {
             ]
             sources = ["Migration Notes"]
         } else {
+            answerText = "Let me restate the question to confirm scope, then lead with the outcome before the reasoning."
             talkingPoints = [
                 "Restate the question to confirm scope before answering",
                 "Lead with the outcome, then the reasoning",
@@ -32,6 +35,7 @@ enum MockAnswerGenerator {
             sessionID: sessionID,
             questionID: question.id,
             question: question.text,
+            answerText: answerText,
             talkingPoints: talkingPoints,
             sources: sources,
             generatedAt: Date()

@@ -44,11 +44,17 @@ class StreamingTranscriptionSession:
         on_partial_transcript: Optional[Callable[[str, float], Awaitable[None]]] = None,
         vad: Optional[VoiceActivityDetector] = None,
         emit_vad_diagnostics: bool = False,
+        source: str = "mixed",
     ) -> None:
         self.session_id = session_id
         self._sample_rate_hz = sample_rate_hz
         self._provider = streaming_provider
         self._emit_event = emit_event
+        # Section 16: which physical audio track this session represents
+        # — "mixed" (single-track, unchanged default) or a separated-
+        # track source, stamped onto every `transcript.partial`/`.final`
+        # event this session emits.
+        self._source = source
         self._on_final_transcript = on_final_transcript
         self._on_turn_boundary = on_turn_boundary
         # Section 15B: called for every *meaningful* (non-empty,
@@ -70,6 +76,13 @@ class StreamingTranscriptionSession:
     @property
     def is_degraded(self) -> bool:
         return self._provider.is_degraded
+
+    def set_source(self, source: str) -> None:
+        """Section 16: called when the meeting-audio track starts partway
+        through an already-running microphone session, so this session's
+        wire-tagged source updates from "mixed" to "microphone" from that
+        point on."""
+        self._source = source
 
     def _validate_sequence(self, sequence: int) -> None:
         if self._last_sequence is not None and sequence <= self._last_sequence:
@@ -140,7 +153,9 @@ class StreamingTranscriptionSession:
             return
 
         if not hypothesis.is_final:
-            await self._emit_event("transcript.partial", events.transcript_partial(session_id=self.session_id, text=text))
+            await self._emit_event(
+                "transcript.partial", events.transcript_partial(session_id=self.session_id, text=text, source=self._source),
+            )
             if text != self._last_partial_text:
                 self._last_partial_text = text
                 if self._on_partial_transcript is not None:
@@ -165,6 +180,7 @@ class StreamingTranscriptionSession:
             "transcript.final",
             events.transcript_final(
                 session_id=self.session_id, segment_id=str(uuid.uuid4()), text=text, started_at=started_at, ended_at=ended_at,
+                source=self._source,
             ),
         )
 

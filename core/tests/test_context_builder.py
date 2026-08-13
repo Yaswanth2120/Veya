@@ -38,3 +38,19 @@ class RenderPromptTests(unittest.TestCase):
     def test_instructs_the_model_not_to_invent_sources(self):
         prompt = render_prompt(SessionContext(), "Any question?")
         self.assertIn("Do not invent citations, sources, or documents.", prompt)
+
+    def test_user_answer_block_appears_distinctly_and_is_labeled_authoritative(self):
+        # Section 16: a follow-up interviewer question must ground itself
+        # in what the user actually said — this is the dedicated field
+        # for that, distinct from the general recent-conversation block.
+        prompt = render_prompt(
+            SessionContext(),
+            "What was the measured impact?",
+            user_answer_block="I profiled YOLOv5 inference, then used TensorRT and batching",
+        )
+        self.assertIn("I profiled YOLOv5 inference, then used TensorRT and batching", prompt)
+        self.assertIn("the user's own most recent actual answer", prompt.lower())
+
+    def test_no_user_answer_block_produces_no_such_section(self):
+        prompt = render_prompt(SessionContext(), "Tell me about yourself")
+        self.assertNotIn("actual answer", prompt.lower())

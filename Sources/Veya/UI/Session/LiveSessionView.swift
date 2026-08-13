@@ -191,8 +191,23 @@ struct LiveSessionView: View {
             if let answer = conversationState.currentAnswer, !isAnswerRoundInFlight {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(answer.question).font(.headline)
-                    ForEach(answer.talkingPoints, id: \.self) { point in
-                        Text("• \(point)").font(.body)
+                    // The natural, speakable answer leads — talking points
+                    // are optional supporting detail, shown expanded here
+                    // (Live Session has room, unlike the compact overlay)
+                    // but never presented as the primary content on their
+                    // own (Section 16).
+                    if !answer.answerText.isEmpty {
+                        Text(answer.answerText).font(.body)
+                    }
+                    if !answer.talkingPoints.isEmpty {
+                        DisclosureGroup("Details") {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(answer.talkingPoints, id: \.self) { point in
+                                    Text("• \(point)").font(.callout).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .font(.caption.bold())
                     }
                     if !answer.sources.isEmpty {
                         Text("Sources").font(.caption.bold()).foregroundStyle(.secondary)
@@ -257,9 +272,21 @@ struct LiveSessionView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(TranscriptDisplayFiltering.displayable(conversationState.segments)) { segment in
-                        Text(segment.text)
-                            .font(.callout)
-                            .padding(.vertical, 2)
+                        VStack(alignment: .leading, spacing: 1) {
+                            // Section 16: a plain, human lane label — never
+                            // the raw "meeting_audio"/"microphone" source
+                            // string. Omitted entirely for "unknown" (single-
+                            // track/mixed mode), where the app has no
+                            // reliable way to tell who was speaking.
+                            if let laneLabel = transcriptLaneLabel(for: segment) {
+                                Text(laneLabel)
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(segment.text)
+                                .font(.callout)
+                        }
+                        .padding(.vertical, 2)
                     }
                     if let partial = conversationState.partialTranscriptText, !partial.isEmpty {
                         Text(partial)
@@ -273,6 +300,14 @@ struct LiveSessionView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .padding(12)
         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func transcriptLaneLabel(for segment: TranscriptSegment) -> String? {
+        switch segment.speakerRole {
+        case SpeakerRole.interviewer.rawValue: return "INTERVIEWER"
+        case SpeakerRole.user.rawValue: return "YOU"
+        default: return nil
+        }
     }
 
     private var sidePanel: some View {

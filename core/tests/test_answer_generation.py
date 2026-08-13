@@ -46,12 +46,35 @@ class ParseAnswerTextTests(unittest.TestCase):
         parsed = parse_answer_text(raw)
         self.assertFalse(hasattr(parsed, "sources"))
 
-    def test_malformed_response_falls_back_to_sentence_splitting(self):
+    def test_malformed_response_falls_back_to_the_full_natural_text_not_a_chopped_first_sentence(self):
+        # A model that ignores the ANSWER:/POINTS: format entirely has
+        # presumably just written natural prose — the whole thing becomes
+        # the answer verbatim rather than being chopped into a "first
+        # sentence" and duplicated into talking points (which produced a
+        # misleadingly bullet-fragment-looking result even from a real
+        # natural answer).
         raw = "This is just a plain sentence. Here is another one. And a third."
         parsed = parse_answer_text(raw)
-        self.assertEqual(parsed.short_answer, "This is just a plain sentence.")
-        self.assertEqual(len(parsed.talking_points), 3)
+        self.assertEqual(parsed.short_answer, raw)
+        self.assertEqual(parsed.talking_points, [])
         self.assertEqual(parsed.caveat, "")
+
+    def test_a_natural_multi_sentence_answer_is_not_truncated_to_the_first_line(self):
+        raw = (
+            "ANSWER: I reduced latency by profiling the YOLOv5 inference path first. "
+            "The biggest gains came from converting the model to TensorRT and tuning\n"
+            "batch processing, which removed the main GPU inference bottleneck.\n"
+            "POINTS:\n"
+            "CAVEAT: none\n"
+        )
+        parsed = parse_answer_text(raw)
+        self.assertEqual(
+            parsed.short_answer,
+            "I reduced latency by profiling the YOLOv5 inference path first. "
+            "The biggest gains came from converting the model to TensorRT and tuning "
+            "batch processing, which removed the main GPU inference bottleneck.",
+        )
+        self.assertEqual(parsed.talking_points, [])
 
     def test_empty_response_produces_an_empty_parsed_answer(self):
         parsed = parse_answer_text("")

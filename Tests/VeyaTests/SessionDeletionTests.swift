@@ -31,11 +31,11 @@ struct SessionDeletionTests {
         let session = Session.makeTestSession(title: "To Be Deleted")
         try await sessionRepository.create(session)
 
-        let segment = TranscriptSegment(id: UUID(), sessionID: session.id, text: "hello", startedAt: 0, endedAt: 1, isFinal: true)
+        let segment = TranscriptSegment(id: UUID(), sessionID: session.id, text: "hello", startedAt: 0, endedAt: 1, isFinal: true, speakerRole: "unknown")
         try await conversationRepository.save(segment)
         let question = DetectedQuestion(id: UUID(), sessionID: session.id, text: "why?", detectedAt: Date())
         try await conversationRepository.save(question)
-        let answer = CopilotAnswer(id: UUID(), sessionID: session.id, questionID: question.id, question: "why?", talkingPoints: ["because"], sources: [], generatedAt: Date())
+        let answer = CopilotAnswer(id: UUID(), sessionID: session.id, questionID: question.id, question: "why?", answerText: "Because.", talkingPoints: ["because"], sources: [], generatedAt: Date())
         try await conversationRepository.save(answer)
         let report = SessionReport(id: UUID(), sessionID: session.id, summary: "s", topics: [], questions: [], generatedAnswers: [], sources: [], decisions: [], actionItems: [], unansweredQuestions: [], preparationGaps: [], generatedAt: Date())
         try await conversationRepository.save(report)

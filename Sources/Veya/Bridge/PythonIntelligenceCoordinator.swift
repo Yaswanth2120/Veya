@@ -71,10 +71,21 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     private var audioChunkSender: AudioChunkSender?
     private var audioForwardingTask: Task<Void, Never>?
 
+    // Section 16: the separated meeting/system-audio track — always in
+    // addition to (never instead of) the microphone track above. `nil`
+    // `meetingAudioCapture` (the default) means this coordinator was
+    // never given a system-audio capability at all; every meeting-audio
+    // method below is then a harmless, honest no-op.
+    private let meetingAudioCapture: AudioCapturing?
+    @Published private(set) var meetingAudioActive = false
+    private var meetingAudioChunkSender: AudioChunkSender?
+    private var meetingAudioForwardingTask: Task<Void, Never>?
+
     init(
         workerManager: PythonWorkerManager = PythonWorkerManager(),
         eventRouter: IPCEventRouter = IPCEventRouter(),
         audioCapture: AudioCapturing? = nil,
+        meetingAudioCapture: AudioCapturing? = nil,
         microphonePermission: MicrophonePermissionChecking = AVFoundationMicrophonePermission(),
         whisperModelManager: WhisperModelManager = WhisperModelManager(),
         localAIPreferencesStore: LocalAIPreferencesStore = LocalAIPreferencesStore()
@@ -82,6 +93,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
         self.workerManager = workerManager
         self.eventRouter = eventRouter
         self.audioCapture = audioCapture
+        self.meetingAudioCapture = meetingAudioCapture
         self.microphonePermission = microphonePermission
         self.whisperModelManager = whisperModelManager
         self.localAIPreferencesStore = localAIPreferencesStore
@@ -553,6 +565,102 @@ final class PythonIntelligenceCoordinator: ObservableObject {
         audioForwardingTask = nil
         audioChunkSender = nil
         Task { await audioCapture?.stop() }
+        tearDownMeetingAudioResources()
+    }
+
+    private func tearDownMeetingAudioResources() {
+        meetingAudioForwardingTask?.cancel()
+        meetingAudioForwardingTask = nil
+        meetingAudioChunkSender = nil
+        meetingAudioActive = false
+        Task { await meetingAudioCapture?.stop() }
+    }
+
+    // MARK: - Section 16: meeting/system-audio track
+
+    /// Starts the separated meeting-audio track — only valid once real
+    /// transcription (the microphone track) is already driving the
+    /// session, since Python's `transcription.start_meeting_audio`
+    /// shares that track's `ConversationOrchestrator`. Returns `false`
+    /// (never throws) for every "not available" reason — no
+    /// `meetingAudioCapture` configured, no active real-transcription
+    /// session, screen-recording permission denied, the selected source
+    /// disappeared, or the RPC itself failing — so callers can show an
+    /// actionable "Meeting audio unavailable" status instead of a crash.
+    @discardableResult
+    func beginMeetingAudioCapture(source: SystemAudioSource? = nil) async -> Bool {
+        guard let meetingAudioCapture, drivingSource == .realTranscription, let sessionID = activeSessionID else {
+            return false
+        }
+        guard !meetingAudioActive else { return true }
+
+        if let systemCapture = meetingAudioCapture as? SystemAudioCapture {
+            systemCapture.selectedSource = source
+        }
+
+        let sessionIdString = sessionID.uuidString
+        let result: MeetingAudioTranscriptionStartResult?
+        do {
+            result = try await workerManager.call(
+                method: "transcription.start_meeting_audio",
+                params: TranscriptionStartParams(sessionId: sessionIdString, sampleRateHz: 16000, channels: 1, encoding: "pcm_s16le")
+            )
+        } catch {
+            BridgeLog.error("transcription.start_meeting_audio failed, errorType=\(String(reflecting: type(of: error)))")
+            return false
+        }
+        guard result?.ok == true else { return false }
+
+        do {
+            try await meetingAudioCapture.start()
+        } catch {
+            let _: OkResult? = try? await workerManager.call(
+                method: "transcription.stop_meeting_audio",
+                params: SessionIdentifierParams(sessionId: sessionIdString)
+            )
+            BridgeLog.error("meeting-audio capture failed to start, errorType=\(String(reflecting: type(of: error)))")
+            return false
+        }
+
+        let sender = AudioChunkSender(sessionId: sessionIdString) { [weak self] params in
+            guard let self else { return }
+            let _: OkResult = try await self.workerManager.call(method: "transcription.meeting_audio_chunk", params: params)
+        }
+        meetingAudioChunkSender = sender
+        let stream = meetingAudioCapture.chunks()
+        meetingAudioForwardingTask = Task {
+            for await chunk in stream {
+                await sender.send(chunk)
+            }
+        }
+        meetingAudioActive = true
+        BridgeLog.info("meeting-audio capture started")
+        return true
+    }
+
+    /// Stops only the meeting-audio track — the microphone track and the
+    /// rest of the session keep running. The one-click "stop meeting
+    /// audio" control the product's consent/privacy requirements call for.
+    func endMeetingAudioCapture() async {
+        guard meetingAudioActive, let sessionID = activeSessionID else { return }
+        tearDownMeetingAudioResources()
+        let _: OkResult? = try? await workerManager.call(
+            method: "transcription.stop_meeting_audio",
+            params: SessionIdentifierParams(sessionId: sessionID.uuidString)
+        )
+    }
+
+    /// The mixed/microphone-only mode "I'm answering" hold-to-talk/toggle
+    /// fallback control — while active, the microphone's own speech is
+    /// treated as authoritative user context rather than a draft trigger
+    /// (Python-side; see `ConversationOrchestrator.set_user_speaking`).
+    /// A harmless no-op if no real-transcription session is active.
+    func setUserSpeaking(_ active: Bool) async {
+        guard let sessionID = activeSessionID, drivingSource == .realTranscription else { return }
+        let _: OkResult? = try? await workerManager.call(
+            method: "conversation.set_user_speaking",
+            params: SetUserSpeakingParams(sessionId: sessionID.uuidString, active: active)
+        )
     }
 
     /// The single, non-technical string `LiveSessionView` shows — the only

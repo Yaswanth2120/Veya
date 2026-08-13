@@ -11,6 +11,12 @@ struct TranscriptSegment: Identifiable, Codable, Equatable, FetchableRecord, Per
     let startedAt: TimeInterval
     let endedAt: TimeInterval?
     let isFinal: Bool
+    /// Section 16: "interviewer"/"user"/"unknown" — drives the
+    /// INTERVIEWER/YOU transcript lanes. Stored as the raw string (not
+    /// `SpeakerRole` directly) so an unrecognized future value never
+    /// fails to decode a persisted row; defaults to "unknown" for rows
+    /// persisted before this field existed.
+    let speakerRole: String
 
     static let databaseTableName = "transcriptSegment"
 }
@@ -42,6 +48,10 @@ struct CopilotAnswer: Identifiable, Codable, Equatable, FetchableRecord, Persist
     let sessionID: UUID
     let questionID: UUID
     let question: String
+    /// The natural, speakable answer — one concise spoken response,
+    /// intended as the primary content (Section 16). Never rigidly
+    /// bullet-only; `talkingPoints` below is optional supporting detail.
+    let answerText: String
     let talkingPoints: [String]
     let sources: [String]
     let generatedAt: Date

@@ -178,6 +178,30 @@ final class DatabaseManager: Sendable {
             }
         }
 
+        migrator.registerMigration("v6_addAnswerTextToGeneratedAnswer") { db in
+            // Section 16: the model's natural, speakable answer sentence(s)
+            // (Python's `ParsedAnswer.short_answer`) was being parsed out
+            // but never actually sent over the wire — only `talkingPoints`
+            // reached Swift, so the answer panel had no choice but to
+            // render bullet points as the primary content. This column is
+            // the durable home for that natural-language answer;
+            // `talkingPoints` becomes optional supporting detail.
+            try db.alter(table: CopilotAnswer.databaseTableName) { t in
+                t.add(column: "answerText", .text).notNull().defaults(to: "")
+            }
+        }
+
+        migrator.registerMigration("v7_addSpeakerRoleToTranscriptSegment") { db in
+            // Section 16: dual-input interview audio — "interviewer"/
+            // "user"/"unknown", driving the INTERVIEWER/YOU transcript
+            // lanes. Existing rows (persisted before separated audio
+            // tracks existed) default to "unknown", an honest label, not
+            // a guess.
+            try db.alter(table: TranscriptSegment.databaseTableName) { t in
+                t.add(column: "speakerRole", .text).notNull().defaults(to: "unknown")
+            }
+        }
+
         try migrator.migrate(dbWriter)
     }
 }

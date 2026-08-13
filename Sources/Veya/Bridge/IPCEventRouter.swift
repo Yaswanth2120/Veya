@@ -163,7 +163,8 @@ final class IPCEventRouter {
                 text: data.text,
                 startedAt: data.startedAt,
                 endedAt: data.endedAt,
-                isFinal: data.isFinal
+                isFinal: data.isFinal,
+                speakerRole: (data.speakerRole ?? .unknown).rawValue
             )
             await state.ingestTranscriptSegment(segment)
 
@@ -214,6 +215,7 @@ final class IPCEventRouter {
                 sessionID: sessionUUID,
                 questionID: questionUUID,
                 question: data.question,
+                answerText: data.answerText ?? "",
                 talkingPoints: talkingPoints,
                 sources: sources,
                 generatedAt: Date()

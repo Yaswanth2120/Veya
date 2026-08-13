@@ -492,6 +492,238 @@ class RealStreamingEventChainTests(unittest.IsolatedAsyncioTestCase):
                     os.environ["VEYA_WHISPER_MODEL"] = old_model
 
 
+class _UserAnswerEngine:
+    """Always transcribes to the user's own spoken answer — deliberately
+    *question-shaped* text ("Tell me about yourself" is a leading
+    interrogative match) to prove separated-track attribution actually
+    matters: if this were misattributed as interviewer speech, it would
+    trigger a draft."""
+
+    def transcribe_pcm(self, pcm_s16le: bytes, sample_rate_hz: int) -> str:
+        return "Tell me about yourself"
+
+
+class MultiTrackInterviewAudioDispatcherTests(unittest.IsolatedAsyncioTestCase):
+    """Section 16: the dispatcher-level meeting-audio track lifecycle and
+    source attribution — real `Dispatcher`/`WorkerContext`, real
+    `ConversationOrchestrator`, only the ASR engine and LLM provider are
+    fakes (matching every other test in this module)."""
+
+    @staticmethod
+    async def _wait_for_event(emitter, name: str, timeout: float = 2.0) -> None:
+        """The batch-CLI transcription path transcribes a completed window
+        on a background consumer task — `handle_chunk` only enqueues it —
+        so a real yield is needed before its events exist, not just an
+        immediate post-dispatch assertion."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        while name not in [n for n, _ in emitter.events] and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+
+    async def _start_both_tracks(self, dispatcher, context, sample_rate_hz=16000):
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        await dispatcher.dispatch(
+            Request(
+                id="2", method="transcription.start",
+                params={"session_id": "s1", "sample_rate_hz": sample_rate_hz, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+        result = await dispatcher.dispatch(
+            Request(
+                id="3", method="transcription.start_meeting_audio",
+                params={"session_id": "s1", "sample_rate_hz": sample_rate_hz, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+        return result
+
+    async def test_meeting_audio_track_requires_microphone_track_first(self):
+        context, _ = make_context(llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        with self.assertRaises(ProtocolError) as ctx:
+            await dispatcher.dispatch(
+                Request(
+                    id="2", method="transcription.start_meeting_audio",
+                    params={"session_id": "s1", "sample_rate_hz": 16000, "channels": 1, "encoding": "pcm_s16le"},
+                ),
+                context,
+            )
+        self.assertEqual(ctx.exception.code, ErrorCode.NOT_RUNNING)
+
+    async def test_meeting_audio_track_already_running_is_rejected(self):
+        context, _ = make_context(llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await self._start_both_tracks(dispatcher, context)
+        with self.assertRaises(ProtocolError) as ctx:
+            await dispatcher.dispatch(
+                Request(
+                    id="4", method="transcription.start_meeting_audio",
+                    params={"session_id": "s1", "sample_rate_hz": 16000, "channels": 1, "encoding": "pcm_s16le"},
+                ),
+                context,
+            )
+        self.assertEqual(ctx.exception.code, ErrorCode.ALREADY_RUNNING)
+        await context.close_transcription_session_if_running()
+
+    async def test_meeting_audio_chunk_without_an_active_track_is_not_running(self):
+        context, _ = make_context()
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        with self.assertRaises(ProtocolError) as ctx:
+            await dispatcher.dispatch(
+                Request(
+                    id="2", method="transcription.meeting_audio_chunk",
+                    params={
+                        "session_id": "s1", "sequence": 0, "started_at_seconds": 0.0, "duration_seconds": 0.5,
+                        "audio_base64": make_pcm_base64(),
+                    },
+                ),
+                context,
+            )
+        self.assertEqual(ctx.exception.code, ErrorCode.NOT_RUNNING)
+
+    async def test_meeting_audio_prompt_is_attributed_interviewer_and_produces_a_question(self):
+        context, emitter = make_context(engine_factory=_QuestionEngine, llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await self._start_both_tracks(dispatcher, context, sample_rate_hz=4000)
+
+        window_bytes = 4 * 4000 * 2
+        await dispatcher.dispatch(
+            Request(
+                id="5", method="transcription.meeting_audio_chunk",
+                params={
+                    "session_id": "s1", "sequence": 0, "started_at_seconds": 0.0, "duration_seconds": 4.0,
+                    "audio_base64": base64.b64encode(b"\x00" * window_bytes).decode("ascii"),
+                },
+            ),
+            context,
+        )
+        await self._wait_for_event(emitter, "question.detected")
+
+        names = [n for n, _ in emitter.events]
+        self.assertIn("question.detected", names)
+        detected = next(d for n, d in emitter.events if n == "question.detected")
+        self.assertEqual(detected["text"], "Why did the migration take six weeks")
+        # The interviewer-track transcript event itself is honestly tagged.
+        final_event = next(d for n, d in emitter.events if n == "transcript.final")
+        self.assertEqual(final_event["source"], "meeting_audio")
+        self.assertEqual(final_event["speaker_role"], "interviewer")
+        await context.close_transcription_session_if_running()
+
+    async def test_microphone_speech_in_separated_mode_is_attributed_user_and_never_produces_a_question(self):
+        context, emitter = make_context(engine_factory=_UserAnswerEngine, llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await self._start_both_tracks(dispatcher, context, sample_rate_hz=4000)
+
+        window_bytes = 4 * 4000 * 2
+        await dispatcher.dispatch(
+            Request(
+                id="5", method="transcription.audio_chunk",
+                params={
+                    "session_id": "s1", "sequence": 0, "started_at_seconds": 0.0, "duration_seconds": 4.0,
+                    "audio_base64": base64.b64encode(b"\x00" * window_bytes).decode("ascii"),
+                },
+            ),
+            context,
+        )
+        await self._wait_for_event(emitter, "transcript.final")
+
+        names = [n for n, _ in emitter.events]
+        self.assertNotIn("question.detected", names)
+        self.assertNotIn("answer.draft_started", names)
+        final_event = next(d for n, d in emitter.events if n == "transcript.final")
+        self.assertEqual(final_event["source"], "microphone")
+        self.assertEqual(final_event["speaker_role"], "user")
+        await context.close_transcription_session_if_running()
+
+    async def test_stop_meeting_audio_only_stops_that_track(self):
+        context, _ = make_context(llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await self._start_both_tracks(dispatcher, context)
+
+        await dispatcher.dispatch(Request(id="6", method="transcription.stop_meeting_audio", params={"session_id": "s1"}), context)
+        self.assertIsNone(context.meeting_audio_session)
+        self.assertIsNotNone(context.transcription_session)
+        self.assertIsNotNone(context.conversation_orchestrator)
+        await context.close_transcription_session_if_running()
+
+    async def test_transcription_stop_closes_both_tracks(self):
+        context, _ = make_context(llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await self._start_both_tracks(dispatcher, context)
+
+        await dispatcher.dispatch(Request(id="6", method="transcription.stop", params={"session_id": "s1"}), context)
+        self.assertIsNone(context.meeting_audio_session)
+        self.assertIsNone(context.transcription_session)
+        self.assertIsNone(context.conversation_orchestrator)
+
+    async def test_set_user_speaking_suppresses_a_mixed_mode_draft(self):
+        context, emitter = make_context(engine_factory=_UserAnswerEngine, llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        await dispatcher.dispatch(
+            Request(
+                id="2", method="transcription.start",
+                params={"session_id": "s1", "sample_rate_hz": 4000, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+        await dispatcher.dispatch(
+            Request(id="3", method="conversation.set_user_speaking", params={"session_id": "s1", "active": True}),
+            context,
+        )
+
+        window_bytes = 4 * 4000 * 2
+        await dispatcher.dispatch(
+            Request(
+                id="4", method="transcription.audio_chunk",
+                params={
+                    "session_id": "s1", "sequence": 0, "started_at_seconds": 0.0, "duration_seconds": 4.0,
+                    "audio_base64": base64.b64encode(b"\x00" * window_bytes).decode("ascii"),
+                },
+            ),
+            context,
+        )
+        await self._wait_for_event(emitter, "transcript.final")
+
+        names = [n for n, _ in emitter.events]
+        self.assertNotIn("question.detected", names)
+        self.assertNotIn("answer.draft_started", names)
+        await context.close_transcription_session_if_running()
+
+    async def test_ordinary_single_track_audio_chunk_is_tagged_mixed_by_default(self):
+        # Backward compatibility: a caller that never mentions the
+        # meeting-audio track at all (every pre-Section-16 test in this
+        # file) still gets a well-formed, honestly-labeled event.
+        context, emitter = make_context()
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        await dispatcher.dispatch(
+            Request(
+                id="2", method="transcription.start",
+                params={"session_id": "s1", "sample_rate_hz": 4000, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+        await dispatcher.dispatch(
+            Request(
+                id="3", method="transcription.audio_chunk",
+                params={
+                    "session_id": "s1", "sequence": 0, "started_at_seconds": 0.0, "duration_seconds": 4.0,
+                    "audio_base64": base64.b64encode(b"\x00" * (4 * 4000 * 2)).decode("ascii"),
+                },
+            ),
+            context,
+        )
+        await context.close_transcription_session_if_running()
+
+        final_events = [d for n, d in emitter.events if n == "transcript.final"]
+        for data in final_events:
+            self.assertEqual(data["source"], "mixed")
+            self.assertEqual(data["speaker_role"], "unknown")
+
+
 class SessionStopFlushesTrailingTurnIntoARealAnswerTests(unittest.IsolatedAsyncioTestCase):
     """Regression test for a review finding: `close_transcription_session_if_running`
     used to close the `ConversationOrchestrator` *before* `TranscriptionSession`,

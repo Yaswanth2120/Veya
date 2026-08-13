@@ -382,7 +382,7 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         await finalize_turn(orchestrator, "Why did this fail?", 0.0, 4.0)
         completed = await emitter.wait_for_event("answer.completed")
-        self.assertTrue(completed["talking_points"])  # a status message, not empty/hung
+        self.assertTrue(completed["answer_text"])  # a status message, not empty/hung
         self.assertEqual(completed["sources"], [])
 
         await orchestrator.close()
@@ -550,6 +550,159 @@ class PartialTranscriptDrivenDraftingTests(unittest.IsolatedAsyncioTestCase):
         await emitter.wait_for_event("answer.draft_started")
         self.assertEqual(orchestrator._recent_transcript_fragments, [])
         await orchestrator.close()
+
+
+class MultiTrackInterviewAudioTests(unittest.IsolatedAsyncioTestCase):
+    """Section 16: dual-input interview audio. `source="meeting_audio"` is
+    the interviewer channel, `source="microphone"` is the user's own
+    channel (in separated-track mode); `source="mixed"` (the default) is
+    today's single-track behavior, exercised exhaustively elsewhere in
+    this file and deliberately left untouched by all of these tests."""
+
+    async def test_meeting_audio_prompt_creates_a_candidate_and_a_draft(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: about me\nPOINTS:\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+        await orchestrator.handle_final_transcript("Tell me about yourself", 0.0, 3.0, source="meeting_audio")
+        await orchestrator.handle_turn_boundary(3.0, source="meeting_audio")
+        detected = await emitter.wait_for_event("question.detected")
+        self.assertEqual(detected["text"], "Tell me about yourself")
+        await orchestrator.close()
+
+    async def test_microphone_speech_in_separated_mode_never_creates_a_draft(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider()
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+        # Even an objectively strong-prompt-shaped sentence, spoken by the
+        # *user*, must never be treated as something to answer.
+        await orchestrator.handle_final_transcript("Tell me about yourself", 0.0, 3.0, source="microphone")
+        await orchestrator.handle_turn_boundary(3.0, source="microphone")
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(emitter.events, [])
+        await orchestrator.close()
+
+    async def test_microphone_speech_in_separated_mode_updates_authoritative_context(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider()
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+        await orchestrator.handle_final_transcript(
+            "I profiled YOLOv5 inference, then used TensorRT and batching", 0.0, 4.0, source="microphone",
+        )
+        await orchestrator.handle_turn_boundary(4.0, source="microphone")
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(orchestrator._recent_user_answer_text, "I profiled YOLOv5 inference, then used TensorRT and batching")
+        await orchestrator.close()
+
+    async def test_interviewer_follow_up_grounds_in_the_users_actual_spoken_answer(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: ok\nPOINTS:\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_final_transcript("How did you reduce latency?", 0.0, 3.0, source="meeting_audio")
+        await orchestrator.handle_turn_boundary(3.0, source="meeting_audio")
+        await emitter.wait_for_event("answer.completed")
+
+        await orchestrator.handle_final_transcript(
+            "I profiled YOLOv5 inference, then used TensorRT and batching", 3.0, 7.0, source="microphone",
+        )
+        await orchestrator.handle_turn_boundary(7.0, source="microphone")
+
+        await orchestrator.handle_final_transcript("What was the measured impact?", 7.0, 9.0, source="meeting_audio")
+        await orchestrator.handle_turn_boundary(9.0, source="meeting_audio")
+        await emitter.wait_for_nth_event("answer.completed", 2)
+
+        self.assertIn("I profiled YOLOv5 inference, then used TensorRT and batching", provider.prompts[-1])
+        await orchestrator.close()
+
+    async def test_veyas_own_suggestion_is_never_treated_as_the_users_actual_answer(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: I would suggest profiling first.\nPOINTS:\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_final_transcript("How did you reduce latency?", 0.0, 3.0, source="meeting_audio")
+        await orchestrator.handle_turn_boundary(3.0, source="meeting_audio")
+        await emitter.wait_for_event("answer.completed")
+
+        # The user never actually spoke — Veya's own suggestion text must
+        # not have silently become the "authoritative" user answer.
+        self.assertIsNone(orchestrator._recent_user_answer_text)
+        await orchestrator.close()
+
+    async def test_mixed_mode_im_answering_suppression_prevents_a_draft(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider()
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        orchestrator.set_user_speaking(True)
+        await orchestrator.handle_final_transcript("Tell me about yourself", 0.0, 3.0)  # source="mixed" default
+        await orchestrator.handle_turn_boundary(3.0)
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(emitter.events, [])
+        self.assertEqual(orchestrator._recent_user_answer_text, "Tell me about yourself")
+        await orchestrator.close()
+
+    async def test_mixed_mode_without_suppression_behaves_exactly_as_before(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: about me\nPOINTS:\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        orchestrator.set_user_speaking(False)
+        await orchestrator.handle_final_transcript("Tell me about yourself", 0.0, 3.0)
+        await orchestrator.handle_turn_boundary(3.0)
+        detected = await emitter.wait_for_event("question.detected")
+        self.assertEqual(detected["text"], "Tell me about yourself")
+        await orchestrator.close()
+
+    async def test_toggling_im_answering_off_again_resumes_normal_candidate_tracking(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: about me\nPOINTS:\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        orchestrator.set_user_speaking(True)
+        await orchestrator.handle_final_transcript("We shipped it last quarter", 0.0, 3.0)
+        await orchestrator.handle_turn_boundary(3.0)
+        await asyncio.sleep(0.05)
+        self.assertEqual(emitter.events, [])
+
+        orchestrator.set_user_speaking(False)
+        await orchestrator.handle_final_transcript("Tell me about yourself", 3.0, 6.0)
+        await orchestrator.handle_turn_boundary(6.0)
+        detected = await emitter.wait_for_event("question.detected")
+        self.assertEqual(detected["text"], "Tell me about yourself")
+        await orchestrator.close()
+
+    async def test_session_end_flushes_a_trailing_user_answer_into_context_without_a_draft(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider()
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        # No VAD boundary ever arrives for the user's trailing answer.
+        await orchestrator.handle_final_transcript("and that fixed the bottleneck", 0.0, 3.0, source="microphone")
+        await orchestrator.close()
+
+        self.assertEqual(orchestrator._recent_user_answer_text, "and that fixed the bottleneck")
+        self.assertEqual(emitter.events, [])  # never generated an answer for the user's own speech
 
 
 # A genuinely realistic ambiguous turn under the *default* scoring

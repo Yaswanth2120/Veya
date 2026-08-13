@@ -36,7 +36,8 @@ final class MockTranscriptSource {
                         text: line.text,
                         startedAt: elapsed,
                         endedAt: elapsed + line.durationSeconds,
-                        isFinal: true
+                        isFinal: true,
+                        speakerRole: SpeakerRole.unknown.rawValue
                     )
                     continuation.yield(segment)
                     elapsed += line.durationSeconds

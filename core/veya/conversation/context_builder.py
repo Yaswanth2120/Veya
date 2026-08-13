@@ -12,14 +12,13 @@ from .models import SessionContext
 
 _RESPONSE_FORMAT_INSTRUCTIONS = """Respond in exactly this format, with no extra commentary before or after:
 
-ANSWER: <one or two sentence direct answer>
+ANSWER: <a natural, speakable answer — the way a person would actually say it out loud in an interview, several sentences if the question warrants it. Not a clipped one-liner, and never just a label for the points below.>
 POINTS:
-- <talking point>
-- <talking point>
-- <talking point>
+- <an optional supporting detail, only if it adds something the natural answer didn't already cover>
+- <another optional supporting detail>
 CAVEAT: <a brief caveat or clarifying assumption, or "none">
 
-Do not invent citations, sources, or documents. If you are not certain, say so in the caveat rather than fabricating specifics."""
+The ANSWER line is the primary content and must stand on its own as something a person could say aloud verbatim — never a rigid list of fragments, and never just a topic label. POINTS is genuinely optional expandable detail, not a restatement of the answer; leave it as just "POINTS:" with no bullets if nothing further is useful. Do not invent citations, sources, or documents. If you are not certain, say so in the caveat rather than fabricating specifics."""
 
 _GROUNDED_INSTRUCTIONS = """Use the supporting context above only for claims specific to the user's documents — do not treat it as ground truth for anything else, and do not quote or cite it beyond what's needed to answer. If your answer would conflict with the supporting context, say so explicitly in the caveat rather than picking one silently."""
 
@@ -33,6 +32,7 @@ def render_prompt(
     document_context_block: str = "",
     memory_context_block: str = "",
     recent_conversation_block: str = "",
+    user_answer_block: str = "",
 ) -> str:
     """Assembles a minimal structured prompt from the session's own
     fields (nothing external — see build prompt non-goals) plus the
@@ -78,6 +78,19 @@ def render_prompt(
     if recent_conversation_block:
         conversation_block = f"Recent live conversation (use only when relevant):\n{recent_conversation_block}\n\n"
 
+    # Section 16 (separated-track interview mode): the user's own most
+    # recent *actual spoken answer*, captured from their microphone as
+    # authoritative — never one of Veya's own prior suggestions, which are
+    # deliberately never remembered as conversation context anywhere. A
+    # follow-up question must ground itself in what the user really said,
+    # not in what Veya guessed they might say.
+    user_answer_section = ""
+    if user_answer_block:
+        user_answer_section = (
+            f"The user's own most recent actual answer, spoken live (ground any follow-up in this, "
+            f"not in any prior suggestion):\n{user_answer_block}\n\n"
+        )
+
     document_block = ""
     grounded_instructions = ""
     if document_context_block:
@@ -94,6 +107,7 @@ def render_prompt(
         f"{session_block}"
         f"{memory_block}"
         f"{conversation_block}"
+        f"{user_answer_section}"
         f"{style_line}"
         f"A question was just asked in this live conversation:\n"
         f"\"{question_text}\"\n\n"

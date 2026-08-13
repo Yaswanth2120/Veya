@@ -72,16 +72,31 @@ struct OverlayView: View {
             .font(.headline)
             .fixedSize(horizontal: false, vertical: true)
 
-        Text("SUGGESTED TALKING POINTS")
-            .font(.caption.bold())
-            .foregroundStyle(.secondary)
-            .padding(.top, 4)
+        // The natural, speakable answer is the primary content — talking
+        // points below are optional supporting detail, never the answer
+        // itself (Section 16).
+        if !answer.answerText.isEmpty {
+            Text(answer.answerText)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+        }
 
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(pointsToShow(for: answer), id: \.self) { point in
-                Label(point, systemImage: "circle.fill")
-                    .labelStyle(BulletLabelStyle())
-                    .font(.callout)
+        // Falls back to showing points even in `.short` style when there's
+        // no natural answer text at all (e.g. an answer persisted before
+        // this field existed) — never leaves the panel effectively blank.
+        if (style != .short || answer.answerText.isEmpty), !pointsToShow(for: answer).isEmpty {
+            Text("DETAILS")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(pointsToShow(for: answer), id: \.self) { point in
+                    Label(point, systemImage: "circle.fill")
+                        .labelStyle(BulletLabelStyle())
+                        .font(.callout)
+                }
             }
         }
 

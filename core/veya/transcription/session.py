@@ -59,8 +59,11 @@ class TranscriptionSession:
         partial_window_seconds: float = 2.0,
         partial_interval_seconds: float = 1.0,
         emit_vad_diagnostics: bool = False,
+        source: str = "mixed",
     ) -> None:
         self.session_id = session_id
+        # Section 16: see `streaming_session.py`'s identical field.
+        self._source = source
         self._buffer = RollingWindowBuffer(RollingWindowConfig(sample_rate_hz=sample_rate_hz))
         self._engine = engine
         self._emit_event = emit_event
@@ -124,6 +127,13 @@ class TranscriptionSession:
     async def _default_run_blocking(fn: Callable[[], str]) -> str:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, fn)
+
+    def set_source(self, source: str) -> None:
+        """Section 16: called when the meeting-audio track starts partway
+        through an already-running microphone session, so this session's
+        wire-tagged source updates from "mixed" to "microphone" from that
+        point on."""
+        self._source = source
 
     def _validate_sequence(self, sequence: int) -> None:
         if self._last_sequence is not None and sequence <= self._last_sequence:
@@ -220,7 +230,9 @@ class TranscriptionSession:
         text = raw_text.strip()
         if not text or _is_non_speech_marker(text):
             return
-        await self._emit_event("transcript.partial", events.transcript_partial(session_id=self.session_id, text=text))
+        await self._emit_event(
+            "transcript.partial", events.transcript_partial(session_id=self.session_id, text=text, source=self._source),
+        )
         if text != self._last_partial_text:
             self._last_partial_text = text
             if self._on_partial_transcript is not None:
@@ -259,6 +271,7 @@ class TranscriptionSession:
                 text=deduped,
                 started_at=started_at,
                 ended_at=ended_at,
+                source=self._source,
             ),
         )
 

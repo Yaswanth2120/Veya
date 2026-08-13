@@ -110,6 +110,11 @@ class WorkerContext:
     active_session_id: Optional[str] = None
     feed_task: Optional[asyncio.Task] = None
     transcription_session: Optional[Union[TranscriptionSession, StreamingTranscriptionSession]] = None
+    # Section 16: the separated meeting/system-audio track, present only
+    # in "Meeting audio + microphone" mode — always in addition to (never
+    # instead of) `transcription_session`, which remains the microphone
+    # track in that mode. `None` in every other mode.
+    meeting_audio_session: Optional[Union[TranscriptionSession, StreamingTranscriptionSession]] = None
     transcription_engine_factory: Callable[[], TranscriptionEngine] = field(
         default=default_whisper_engine_factory
     )
@@ -169,6 +174,13 @@ class WorkerContext:
             session = self.transcription_session
             self.transcription_session = None
             await session.close()
+        # The meeting-audio track (Section 16) is closed the same way,
+        # before the orchestrator — its own trailing flush can likewise
+        # finalize a trailing interviewer turn right at session end.
+        if self.meeting_audio_session is not None:
+            meeting_session = self.meeting_audio_session
+            self.meeting_audio_session = None
+            await meeting_session.close()
         if self.conversation_orchestrator is not None:
             orchestrator = self.conversation_orchestrator
             self.conversation_orchestrator = None
@@ -353,13 +365,7 @@ async def _handle_mock_stop_live_feed(params: dict, context: WorkerContext) -> d
     return {"ok": True}
 
 
-async def _handle_transcription_start(params: dict, context: WorkerContext) -> dict:
-    session_id = params.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
-    if context.active_session_id != session_id:
-        raise ProtocolError(ErrorCode.SESSION_NOT_FOUND, f"No active session with id {session_id!r}.")
-
+def _validate_audio_format_params(params: dict) -> int:
     sample_rate_hz = params.get("sample_rate_hz")
     channels = params.get("channels")
     encoding = params.get("encoding")
@@ -369,6 +375,72 @@ async def _handle_transcription_start(params: dict, context: WorkerContext) -> d
         raise ProtocolError(ErrorCode.INVALID_PARAMS, "Only mono ('channels': 1) audio is supported.")
     if encoding != "pcm_s16le":
         raise ProtocolError(ErrorCode.INVALID_PARAMS, "Only the 'pcm_s16le' encoding is supported.")
+    return sample_rate_hz
+
+
+def _build_transcription_session(
+    session_id: str,
+    sample_rate_hz: int,
+    engine: TranscriptionEngine,
+    context: WorkerContext,
+    on_final_transcript,
+    on_turn_boundary,
+    on_partial_transcript,
+    source: str = "mixed",
+) -> tuple[Union[TranscriptionSession, StreamingTranscriptionSession], str]:
+    """Shared by both the microphone track and the Section 16 meeting-
+    audio track — same engine-selection logic (prefer the genuine
+    streaming binary, fall back to the degraded batch-CLI path), just
+    parameterized by which callbacks/session-id/source to wire up. Returns
+    the constructed session and the honest `asr_provider` label
+    ("streaming"/"degraded_batch")."""
+    emit_vad_diagnostics = os.environ.get("VEYA_VAD_DIAGNOSTICS") == "1"
+    stream_binary = resolve_streaming_binary_path()
+    model_path = os.environ.get("VEYA_WHISPER_MODEL")
+    if stream_binary is not None and model_path:
+        streaming_provider = WhisperCppStreamingProvider(
+            binary_path=stream_binary, model_path=Path(model_path), sample_rate_hz=sample_rate_hz,
+        )
+        session: Union[TranscriptionSession, StreamingTranscriptionSession] = StreamingTranscriptionSession(
+            session_id=session_id,
+            sample_rate_hz=sample_rate_hz,
+            streaming_provider=streaming_provider,
+            emit_event=context.emit_event,
+            on_final_transcript=on_final_transcript,
+            on_turn_boundary=on_turn_boundary,
+            on_partial_transcript=on_partial_transcript,
+            emit_vad_diagnostics=emit_vad_diagnostics,
+            source=source,
+        )
+        return session, "streaming"
+
+    session = TranscriptionSession(
+        session_id=session_id,
+        sample_rate_hz=sample_rate_hz,
+        engine=engine,
+        emit_event=context.emit_event,
+        on_final_transcript=on_final_transcript,
+        on_turn_boundary=on_turn_boundary,
+        on_partial_transcript=on_partial_transcript,
+        source=source,
+        # Opt-in only (`VEYA_VAD_DIAGNOSTICS=1`) — a real developer
+        # diagnostics screen needs real RMS/threshold/state per chunk to
+        # verify VAD behavior against the actual microphone, but every
+        # ordinary session should not pay the cost of an extra event per
+        # audio chunk.
+        emit_vad_diagnostics=emit_vad_diagnostics,
+    )
+    return session, "degraded_batch"
+
+
+async def _handle_transcription_start(params: dict, context: WorkerContext) -> dict:
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
+    if context.active_session_id != session_id:
+        raise ProtocolError(ErrorCode.SESSION_NOT_FOUND, f"No active session with id {session_id!r}.")
+
+    sample_rate_hz = _validate_audio_format_params(params)
     if context.transcription_session is not None:
         raise ProtocolError(ErrorCode.ALREADY_RUNNING, "A transcription session is already running for this worker.")
 
@@ -403,53 +475,79 @@ async def _handle_transcription_start(params: dict, context: WorkerContext) -> d
     )
     context.conversation_orchestrator = orchestrator
 
-    emit_vad_diagnostics = os.environ.get("VEYA_VAD_DIAGNOSTICS") == "1"
+    # Section 16: this track's `source` is dynamic, not fixed at bind
+    # time — "meeting audio + microphone" mode can start its meeting-audio
+    # track *after* this one, so every callback checks live state rather
+    # than capturing a value that might still be wrong. Single-track mode
+    # (`meeting_audio_session` never started) keeps today's "mixed"
+    # behavior forever, unchanged.
+    def _mic_source() -> str:
+        return "microphone" if context.meeting_audio_session is not None else "mixed"
 
-    # Section 15: prefer the genuine incremental streaming engine
-    # (`whisper-stream-stdin`) — real partial hypotheses roughly every
-    # second, not just a final transcript once a fixed ~4s window
-    # completes. Only falls back to the older rolling-window batch-CLI
-    # `TranscriptionSession` when the streaming binary genuinely isn't
-    # available; that fallback is reported honestly via
-    # `asr_provider: "degraded_batch"` below, never silently presented as
-    # the real-time engine.
-    stream_binary = resolve_streaming_binary_path()
-    model_path = os.environ.get("VEYA_WHISPER_MODEL")
-    if stream_binary is not None and model_path:
-        streaming_provider = WhisperCppStreamingProvider(
-            binary_path=stream_binary, model_path=Path(model_path), sample_rate_hz=sample_rate_hz,
-        )
-        context.transcription_session = StreamingTranscriptionSession(
-            session_id=session_id,
-            sample_rate_hz=sample_rate_hz,
-            streaming_provider=streaming_provider,
-            emit_event=context.emit_event,
-            on_final_transcript=orchestrator.handle_final_transcript,
-            on_turn_boundary=orchestrator.handle_turn_boundary,
-            on_partial_transcript=orchestrator.handle_partial_transcript,
-            emit_vad_diagnostics=emit_vad_diagnostics,
-        )
-        asr_provider = "streaming"
-    else:
-        context.transcription_session = TranscriptionSession(
-            session_id=session_id,
-            sample_rate_hz=sample_rate_hz,
-            engine=engine,
-            emit_event=context.emit_event,
-            on_final_transcript=orchestrator.handle_final_transcript,
-            on_turn_boundary=orchestrator.handle_turn_boundary,
-            on_partial_transcript=orchestrator.handle_partial_transcript,
-            # Opt-in only (`VEYA_VAD_DIAGNOSTICS=1`) — a real developer
-            # diagnostics screen needs real RMS/threshold/state per chunk to
-            # verify VAD behavior against the actual microphone, but every
-            # ordinary session should not pay the cost of an extra event per
-            # audio chunk.
-            emit_vad_diagnostics=emit_vad_diagnostics,
-        )
-        asr_provider = "degraded_batch"
+    async def on_final_transcript(text: str, started_at: float, ended_at: float) -> None:
+        await orchestrator.handle_final_transcript(text, started_at, ended_at, source=_mic_source())
+
+    async def on_partial_transcript(text: str, ended_at: float) -> None:
+        await orchestrator.handle_partial_transcript(text, ended_at, source=_mic_source())
+
+    async def on_turn_boundary(boundary_time: float) -> None:
+        await orchestrator.handle_turn_boundary(boundary_time, source=_mic_source())
+
+    session, asr_provider = _build_transcription_session(
+        session_id, sample_rate_hz, engine, context, on_final_transcript, on_turn_boundary, on_partial_transcript,
+    )
+    context.transcription_session = session
 
     logger.info("transcription.start session_id=%s sample_rate_hz=%s asr_provider=%s", session_id, sample_rate_hz, asr_provider)
     return {"ok": True, "answer_intelligence_available": llm_provider is not None, "asr_provider": asr_provider}
+
+
+async def _handle_transcription_start_meeting_audio(params: dict, context: WorkerContext) -> dict:
+    """Section 16: starts the separated meeting/system-audio track —
+    always the interviewer channel. Requires the microphone track
+    (`transcription.start`) to already be running, since it shares that
+    track's `ConversationOrchestrator` rather than creating a second,
+    disconnected conversation."""
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
+    if context.active_session_id != session_id:
+        raise ProtocolError(ErrorCode.SESSION_NOT_FOUND, f"No active session with id {session_id!r}.")
+    if context.transcription_session is None or context.conversation_orchestrator is None:
+        raise ProtocolError(ErrorCode.NOT_RUNNING, "The microphone track must be started (transcription.start) before the meeting-audio track.")
+    if context.meeting_audio_session is not None:
+        raise ProtocolError(ErrorCode.ALREADY_RUNNING, "A meeting-audio transcription session is already running for this worker.")
+
+    sample_rate_hz = _validate_audio_format_params(params)
+
+    try:
+        engine = context.transcription_engine_factory()
+    except TranscriptionSetupError as exc:
+        raise ProtocolError(ErrorCode.TRANSCRIPTION_UNAVAILABLE, exc.reason) from exc
+
+    orchestrator = context.conversation_orchestrator
+
+    async def on_final_transcript(text: str, started_at: float, ended_at: float) -> None:
+        await orchestrator.handle_final_transcript(text, started_at, ended_at, source="meeting_audio")
+
+    async def on_partial_transcript(text: str, ended_at: float) -> None:
+        await orchestrator.handle_partial_transcript(text, ended_at, source="meeting_audio")
+
+    async def on_turn_boundary(boundary_time: float) -> None:
+        await orchestrator.handle_turn_boundary(boundary_time, source="meeting_audio")
+
+    session, asr_provider = _build_transcription_session(
+        session_id, sample_rate_hz, engine, context, on_final_transcript, on_turn_boundary, on_partial_transcript,
+        source="meeting_audio",
+    )
+    context.meeting_audio_session = session
+    # The microphone track was constructed before we knew separated-track
+    # mode was active, so its wire-tagged source is still "mixed" — flip
+    # it to "microphone" now that the meeting-audio track is genuinely up.
+    context.transcription_session.set_source("microphone")
+
+    logger.info("transcription.start_meeting_audio session_id=%s sample_rate_hz=%s asr_provider=%s", session_id, sample_rate_hz, asr_provider)
+    return {"ok": True, "asr_provider": asr_provider}
 
 
 async def _handle_transcription_audio_chunk(params: dict, context: WorkerContext) -> dict:
@@ -459,6 +557,17 @@ async def _handle_transcription_audio_chunk(params: dict, context: WorkerContext
     if context.transcription_session is None or context.transcription_session.session_id != session_id:
         raise ProtocolError(ErrorCode.NOT_RUNNING, "No active transcription session for this session id.")
 
+    sequence, started_at, duration, pcm = _decode_audio_chunk_params(params)
+
+    # `handle_chunk` raises ProtocolError itself for out-of-order/duplicate
+    # sequences (propagates unchanged, per `dispatch`'s ProtocolError
+    # passthrough) and otherwise only buffers — it does not wait for the
+    # resulting window (if any) to actually transcribe.
+    await context.transcription_session.handle_chunk(sequence, started_at, duration, pcm)
+    return {"ok": True}
+
+
+def _decode_audio_chunk_params(params: dict) -> tuple[int, float, float, bytes]:
     sequence = params.get("sequence")
     started_at = params.get("started_at_seconds")
     duration = params.get("duration_seconds")
@@ -482,12 +591,18 @@ async def _handle_transcription_audio_chunk(params: dict, context: WorkerContext
             ErrorCode.INVALID_PARAMS,
             f"Audio chunk exceeds the maximum size of {MAX_AUDIO_CHUNK_BYTES} bytes.",
         )
+    return sequence, float(started_at), float(duration), pcm
 
-    # `handle_chunk` raises ProtocolError itself for out-of-order/duplicate
-    # sequences (propagates unchanged, per `dispatch`'s ProtocolError
-    # passthrough) and otherwise only buffers — it does not wait for the
-    # resulting window (if any) to actually transcribe.
-    await context.transcription_session.handle_chunk(sequence, float(started_at), float(duration), pcm)
+
+async def _handle_transcription_meeting_audio_chunk(params: dict, context: WorkerContext) -> dict:
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
+    if context.meeting_audio_session is None or context.meeting_audio_session.session_id != session_id:
+        raise ProtocolError(ErrorCode.NOT_RUNNING, "No active meeting-audio transcription session for this session id.")
+
+    sequence, started_at, duration, pcm = _decode_audio_chunk_params(params)
+    await context.meeting_audio_session.handle_chunk(sequence, started_at, duration, pcm)
     return {"ok": True}
 
 
@@ -498,8 +613,47 @@ async def _handle_transcription_stop(params: dict, context: WorkerContext) -> di
     if context.transcription_session is None or context.transcription_session.session_id != session_id:
         raise ProtocolError(ErrorCode.NOT_RUNNING, "No active transcription session for this session id.")
 
+    # Stopping the microphone track always ends the whole interview
+    # session, including a still-running meeting-audio track — there is
+    # no meaningful "mic stopped but meeting audio still listening" state.
     await context.close_transcription_session_if_running()
     logger.info("transcription.stop session_id=%s", session_id)
+    return {"ok": True}
+
+
+async def _handle_transcription_stop_meeting_audio(params: dict, context: WorkerContext) -> dict:
+    """Section 16's one-click "stop meeting audio capture" control — stops
+    *only* the meeting-audio track, leaving the microphone track (and the
+    rest of the interview session) running. Never raises `NOT_RUNNING` if
+    already stopped/never started — a harmless no-op, since this is also
+    what a source-disconnect handler calls defensively."""
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
+    if context.meeting_audio_session is not None:
+        session = context.meeting_audio_session
+        context.meeting_audio_session = None
+        await session.close()
+    logger.info("transcription.stop_meeting_audio session_id=%s", session_id)
+    return {"ok": True}
+
+
+async def _handle_conversation_set_user_speaking(params: dict, context: WorkerContext) -> dict:
+    """Section 16's mixed/microphone-only mode fallback control ("I'm
+    answering" hold-to-talk or toggle) — while active, speech on the
+    single "mixed" track is treated as authoritative user context rather
+    than a draft trigger. No-op (not an error) if no orchestrator is
+    active yet, so Swift can wire this hotkey up unconditionally without
+    worrying about session lifecycle races."""
+    session_id = params.get("session_id")
+    active = params.get("active")
+    if not isinstance(session_id, str) or not session_id:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
+    if not isinstance(active, bool):
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'active' is required and must be a boolean.")
+
+    if context.conversation_orchestrator is not None and context.conversation_orchestrator.session_id == session_id:
+        context.conversation_orchestrator.set_user_speaking(active)
     return {"ok": True}
 
 
@@ -874,6 +1028,10 @@ _HANDLERS: dict[str, Handler] = {
     "transcription.start": _handle_transcription_start,
     "transcription.audio_chunk": _handle_transcription_audio_chunk,
     "transcription.stop": _handle_transcription_stop,
+    "transcription.start_meeting_audio": _handle_transcription_start_meeting_audio,
+    "transcription.meeting_audio_chunk": _handle_transcription_meeting_audio_chunk,
+    "transcription.stop_meeting_audio": _handle_transcription_stop_meeting_audio,
+    "conversation.set_user_speaking": _handle_conversation_set_user_speaking,
     "answer.cancel": _handle_answer_cancel,
     "knowledge.ingest": _handle_knowledge_ingest,
     "knowledge.remove": _handle_knowledge_remove,

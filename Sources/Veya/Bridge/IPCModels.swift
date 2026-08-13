@@ -181,6 +181,23 @@ struct AudioChunkParams: Encodable, Sendable {
     let audioBase64: String
 }
 
+/// Section 16: `transcription.start_meeting_audio`'s own result — a
+/// subset of `TranscriptionStartResult`'s fields (no
+/// `answerIntelligenceAvailable`; that's a property of the shared
+/// `ConversationOrchestrator`, reported once by the microphone track's
+/// own `transcription.start`, not per-track).
+struct MeetingAudioTranscriptionStartResult: Decodable, Sendable {
+    let ok: Bool
+    let asrProvider: String?
+}
+
+/// `conversation.set_user_speaking`'s params — the mixed/microphone-only
+/// mode "I'm answering" hold-to-talk/toggle (Section 16).
+struct SetUserSpeakingParams: Encodable, Sendable {
+    let sessionId: String
+    let active: Bool
+}
+
 /// `knowledge.ingest`'s params. `filePath` must already be the
 /// app-managed copied-document path (`SessionDocument.storedPath`) —
 /// Python validates it resolves beneath `VEYA_DOCUMENTS_DIRECTORY` before
@@ -392,9 +409,31 @@ struct SessionEndedEventData: Decodable, Sendable {
     let sessionId: String
 }
 
+/// Section 16: which physical audio track a transcript came from.
+/// `mixed` (single-track mode) is the default/only value every session
+/// used before this section — `meetingAudio`/`microphone` only appear in
+/// "Meeting audio + microphone" mode.
+enum TranscriptAudioSource: String, Decodable, Sendable {
+    case mixed
+    case meetingAudio = "meeting_audio"
+    case microphone
+}
+
+/// A pure, static label derived from `TranscriptAudioSource` alone —
+/// never a claim of real speaker identification beyond what the
+/// separated audio track actually tells us. `unknown` is an honest
+/// admission for single-track/"mixed" audio, not a guess.
+enum SpeakerRole: String, Decodable, Sendable {
+    case interviewer
+    case user
+    case unknown
+}
+
 struct TranscriptPartialEventData: Decodable, Sendable {
     let sessionId: String
     let text: String
+    let source: TranscriptAudioSource?
+    let speakerRole: SpeakerRole?
 }
 
 struct TranscriptFinalEventData: Decodable, Sendable {
@@ -404,6 +443,8 @@ struct TranscriptFinalEventData: Decodable, Sendable {
     let startedAt: Double
     let endedAt: Double?
     let isFinal: Bool
+    let source: TranscriptAudioSource?
+    let speakerRole: SpeakerRole?
 }
 
 struct QuestionDetectedEventData: Decodable, Sendable {
@@ -488,12 +529,18 @@ struct AnswerCompletedEventData: Decodable, Sendable {
     let sessionId: String
     let questionId: String
     let question: String
+    /// The natural, speakable answer (Section 16) — the primary content;
+    /// `talkingPoints` is optional supporting detail, never the sole
+    /// answer. Defaults to "" only for decode resilience against an
+    /// older worker version; a worker on this protocol version always
+    /// sends it.
+    let answerText: String?
     let talkingPoints: [String]
     let sources: [AnswerSourceEventData]
     let sequence: Int
     /// Optional caveat/clarifying assumption — folded into the persisted
     /// `CopilotAnswer.talkingPoints` as a final entry by `IPCEventRouter`
-    /// rather than requiring a `CopilotAnswer` schema/migration change.
+    /// rather than requiring a further `CopilotAnswer` schema change.
     let caveat: String
 }
 

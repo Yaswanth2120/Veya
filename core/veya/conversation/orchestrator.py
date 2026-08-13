@@ -106,21 +106,67 @@ class ConversationOrchestrator:
         # the same id (so Swift can recognize "this is the same evolving
         # question, not a new one") instead of minting a fresh one.
         self._draft_question_id: Optional[str] = None
+        # Section 16: dual-input interview audio. `source` on every
+        # transcript callback is one of "mixed" (single-track — today's
+        # unchanged default and behavior), "meeting_audio" (separated-
+        # track mode's interviewer channel), or "microphone" (separated-
+        # track mode's user channel). A completely separate `TurnAssembler`
+        # for the user's own speech — it only ever accumulates toward
+        # `_recent_user_answer_text`, never toward candidate/draft
+        # tracking, and is never affected by cancellation of an
+        # interviewer-turn draft or vice versa.
+        self._user_turn_assembler = TurnAssembler()
+        self._recent_user_answer_text: Optional[str] = None
+        # "I'm answering" hold-to-talk/toggle (mixed/microphone-only mode
+        # only — see `set_user_speaking`) — while active, "mixed"-source
+        # speech is treated exactly like separated-track "microphone"
+        # speech: authoritative user context, never a draft trigger.
+        self._user_speaking_suppressed = False
 
     @property
     def answer_intelligence_available(self) -> bool:
         return self._llm_provider is not None
 
-    async def handle_final_transcript(self, text: str, started_at: float, ended_at: float) -> None:
+    def _role_for_source(self, source: str) -> str:
+        """"interviewer"/"user"/"unknown" — see the Section 16 comment on
+        `__init__`. Never persisted/logged as a claim of real speaker
+        identification beyond what the source actually tells us: separated
+        audio tracks (real, reliable) vs. everything else (never claimed
+        reliable — "unknown" unless the user explicitly holds "I'm
+        answering")."""
+        if source == "meeting_audio":
+            return "interviewer"
+        if source == "microphone":
+            return "user"
+        if source == "mixed" and self._user_speaking_suppressed:
+            return "user"
+        return "unknown"
+
+    def set_user_speaking(self, active: bool) -> None:
+        """The mixed/microphone-only mode fallback control ("I'm
+        answering" hold-to-talk or toggle) — while active, speech on the
+        single "mixed" track is treated exactly like separated-track
+        microphone speech: authoritative user context, never a draft
+        trigger. Never affects separated-track mode, which already knows
+        which physical track is which reliably."""
+        self._user_speaking_suppressed = active
+
+    async def handle_final_transcript(self, text: str, started_at: float, ended_at: float, source: str = "mixed") -> None:
         """Called for real, deduplicated final transcript text only —
         never for partials. A no-op session-wide if no LLM provider is
         available: detecting questions nobody can answer would just be a
         confusing dead-end UI state (see
         docs/QUESTION_AND_ANSWER_INTELLIGENCE.md's fallback behavior).
-        Feeds the fragment into the turn assembler — a turn only reaches
-        classification once a real endpoint (VAD boundary/session stop/
-        max duration) finalizes it, never on every individual fragment."""
+        `source="mixed"` (the default) is today's single-track behavior,
+        unchanged. Feeds the fragment into the turn assembler — a turn
+        only reaches classification once a real endpoint (VAD boundary/
+        session stop/max duration) finalizes it, never on every individual
+        fragment."""
         if not self.answer_intelligence_available:
+            return
+
+        if self._role_for_source(source) == "user":
+            await self._handle_user_final_transcript(text, started_at, ended_at)
             return
 
         finalized_turn = self._turn_assembler.add_fragment(text, started_at, ended_at)
@@ -138,7 +184,7 @@ class ConversationOrchestrator:
         # waiting purely on a VAD boundary there either.
         await self._advance_candidate_tracker(self._turn_assembler.peek_pending_text())
 
-    async def handle_partial_transcript(self, text: str, ended_at: float) -> None:
+    async def handle_partial_transcript(self, text: str, ended_at: float, source: str = "mixed") -> None:
         """Called for every meaningful (non-empty, changed) streaming ASR
         partial hypothesis — never persisted, never fed into
         `TurnAssembler` (partials are never final transcript). This is
@@ -146,10 +192,28 @@ class ConversationOrchestrator:
         a high-confidence prompt can start drafting from a partial alone,
         well before any `transcript.final` or VAD boundary arrives.
         `handle_final_transcript`/`handle_turn_boundary` still own the
-        actual turn finalization and reconciliation."""
+        actual turn finalization and reconciliation. User-role speech
+        (Section 16) never drives drafting even as a partial — only its
+        eventual final transcript becomes authoritative context."""
         if not self.answer_intelligence_available:
             return
+        if self._role_for_source(source) == "user":
+            return
         await self._advance_candidate_tracker(text)
+
+    async def _handle_user_final_transcript(self, text: str, started_at: float, ended_at: float) -> None:
+        """The user's own speech (Section 16, separated-track mode or
+        "I'm answering" suppression) never runs question detection/
+        classification/drafting — it only ever updates the authoritative
+        "what did the user actually just say" context a later interviewer
+        follow-up grounds itself in. Assembled into complete turns the
+        same way interviewer speech is (a real answer can span multiple
+        Whisper windows too), just without any of the candidate/draft
+        machinery running on it."""
+        finalized_turn = self._user_turn_assembler.add_fragment(text, started_at, ended_at)
+        if finalized_turn is not None:
+            self._recent_user_answer_text = finalized_turn
+            self._remember_transcript(finalized_turn)
 
     async def _advance_candidate_tracker(self, pending_text: str) -> None:
         stripped = pending_text.strip()
@@ -177,13 +241,19 @@ class ConversationOrchestrator:
         else:
             self._cancel_speculative_finalize_timer()
 
-    async def handle_turn_boundary(self, boundary_time: float) -> None:
+    async def handle_turn_boundary(self, boundary_time: float, source: str = "mixed") -> None:
         """Called by `TranscriptionSession` when local VAD detects a turn
         has ended at audio-timeline position `boundary_time`. If the
         fragment covering that boundary hasn't arrived yet (Whisper
         transcription lags real-time), this only records the boundary —
         `handle_final_transcript` finalizes once that fragment shows up."""
         if not self.answer_intelligence_available:
+            return
+        if self._role_for_source(source) == "user":
+            finalized_turn = self._user_turn_assembler.request_finalize_at(boundary_time)
+            if finalized_turn is not None:
+                self._recent_user_answer_text = finalized_turn
+                self._remember_transcript(finalized_turn)
             return
         finalized_turn = self._turn_assembler.request_finalize_at(boundary_time)
         if finalized_turn is not None:
@@ -339,6 +409,7 @@ class ConversationOrchestrator:
             document_context_block=document_context_block,
             memory_context_block=memory_context_block,
             recent_conversation_block=self._recent_conversation_block(exclude_current_question_from_context),
+            user_answer_block=self._recent_user_answer_text or "",
         )
 
         self._active_answer_task = asyncio.create_task(
@@ -393,6 +464,7 @@ class ConversationOrchestrator:
                 sequence=sequence,
                 question_id=question_id,
                 question=question_text,
+                answer_text=parsed.short_answer,
                 talking_points=parsed.talking_points,
                 sources=chunk_sources(retrieved),
                 caveat=parsed.caveat,
@@ -412,7 +484,8 @@ class ConversationOrchestrator:
                 sequence=sequence,
                 question_id=question_id,
                 question=question_text,
-                talking_points=[_GENERATION_FAILED_MESSAGE],
+                answer_text=_GENERATION_FAILED_MESSAGE,
+                talking_points=[],
                 sources=[],
                 caveat="",
             ),
@@ -444,6 +517,14 @@ class ConversationOrchestrator:
         finalized_turn = self._turn_assembler.flush()
         if finalized_turn is not None:
             await self._process_finalized_turn(finalized_turn)
+
+        # A trailing user answer never triggers generation, but still
+        # deserves to be captured as context rather than silently dropped
+        # if the session ends mid-answer.
+        finalized_user_turn = self._user_turn_assembler.flush()
+        if finalized_user_turn is not None:
+            self._recent_user_answer_text = finalized_user_turn
+            self._remember_transcript(finalized_user_turn)
 
         # Whatever is active at this point — started by the flush above,
         # by `TranscriptionSession.close()`'s own callback moments ago, or
