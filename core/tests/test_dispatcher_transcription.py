@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -369,6 +371,125 @@ class _QuestionEngine:
 
     def transcribe_pcm(self, pcm_s16le: bytes, sample_rate_hz: int) -> str:
         return "Why did the migration take six weeks"
+
+
+# A tiny real executable standing in for `whisper-stream-stdin` — real
+# subprocess plumbing (argv, stdin/stdout pipes, EOF handling), no real
+# Whisper model required. Emits a scripted partial-then-final sequence
+# after receiving the first byte of real audio, ignoring content —
+# exercises the *real* event chain (Dispatcher -> StreamingTranscriptionSession
+# -> ConversationOrchestrator -> QuestionCandidateTracker) end to end,
+# with only the ASR subprocess's own transcription output faked.
+_FAKE_STREAMING_BINARY_SOURCE = """#!/usr/bin/env python3
+import sys, json, time
+
+data = sys.stdin.buffer.read(1)
+if not data:
+    sys.exit(0)
+
+for text in ["Tell me about", "Tell me about yourself"]:
+    print(json.dumps({"type": "partial", "text": text}))
+    sys.stdout.flush()
+    time.sleep(0.05)
+
+# Drain the rest of stdin (real audio still arriving) without reacting to it.
+while sys.stdin.buffer.read(4096):
+    pass
+
+print(json.dumps({"type": "final", "text": "Tell me about yourself."}))
+sys.stdout.flush()
+"""
+
+
+def _make_fake_streaming_binary(tmp_dir) -> str:
+    import stat
+    from pathlib import Path
+
+    path = Path(tmp_dir) / "fake-whisper-stream-stdin"
+    path.write_text(_FAKE_STREAMING_BINARY_SOURCE)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return str(path)
+
+
+class RealStreamingEventChainTests(unittest.IsolatedAsyncioTestCase):
+    """Regression test for a review finding: the streaming ASR provider
+    emitted `transcript.partial`, but Python routed it *only* to Swift
+    display — `QuestionCandidateTracker` ran solely off `transcript.final`,
+    so a strong spoken prompt could sit fully transcribed on screen with
+    no answer forming. Drives the real `Dispatcher` -> real
+    `StreamingTranscriptionSession` -> real `ConversationOrchestrator`
+    chain (only the ASR subprocess itself is a small fake binary, not a
+    mocked Python class) and asserts the actual required event order:
+    transcript.partial -> question.candidate -> answer.draft_started ->
+    answer.draft_delta, with no `transcript.final`/VAD boundary involved
+    at any point."""
+
+    async def test_a_strong_partial_alone_produces_the_full_draft_event_chain(self):
+        with tempfile.TemporaryDirectory(prefix="veya-streaming-chain-") as tmp:
+            binary_path = _make_fake_streaming_binary(tmp)
+            model_path = Path(tmp) / "fake-model.bin"
+            model_path.write_bytes(b"not a real model, never read by the fake binary")
+
+            old_stream_bin = os.environ.get("VEYA_WHISPER_STREAM_BIN")
+            old_model = os.environ.get("VEYA_WHISPER_MODEL")
+            os.environ["VEYA_WHISPER_STREAM_BIN"] = binary_path
+            os.environ["VEYA_WHISPER_MODEL"] = str(model_path)
+            try:
+                context, emitter = make_context(llm_provider_factory=_FastAnswerProvider)
+                dispatcher = Dispatcher()
+                await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+                start_result = await dispatcher.dispatch(
+                    Request(
+                        id="2", method="transcription.start",
+                        params={"session_id": "s1", "sample_rate_hz": 16000, "channels": 1, "encoding": "pcm_s16le"},
+                    ),
+                    context,
+                )
+                self.assertEqual(start_result["asr_provider"], "streaming")
+
+                await dispatcher.dispatch(
+                    Request(
+                        id="3", method="transcription.audio_chunk",
+                        params={
+                            "session_id": "s1", "sequence": 0, "started_at_seconds": 0.0, "duration_seconds": 0.5,
+                            "audio_base64": make_pcm_base64(1000),
+                        },
+                    ),
+                    context,
+                )
+
+                names_at = lambda: [name for name, _ in emitter.events]  # noqa: E731
+
+                deadline = asyncio.get_event_loop().time() + 5.0
+                while "answer.draft_delta" not in names_at() and asyncio.get_event_loop().time() < deadline:
+                    await asyncio.sleep(0.02)
+
+                names = names_at()
+                self.assertIn("transcript.partial", names)
+                self.assertIn("question.candidate", names)
+                self.assertIn("answer.draft_started", names)
+                self.assertIn("answer.draft_delta", names)
+
+                # The exact required ordering, ignoring interleaved
+                # unrelated events (turn.state, etc.).
+                relevant = [n for n in names if n in ("transcript.partial", "question.candidate", "answer.draft_started", "answer.draft_delta")]
+                self.assertEqual(relevant.index("transcript.partial") < relevant.index("question.candidate"), True)
+                self.assertEqual(relevant.index("question.candidate") < relevant.index("answer.draft_started"), True)
+                self.assertEqual(relevant.index("answer.draft_started") < relevant.index("answer.draft_delta"), True)
+
+                # No `transcript.final`/VAD boundary was needed for any of this.
+                self.assertNotIn("transcript.final", names[: names.index("answer.draft_delta") + 1])
+
+                await context.close_transcription_session_if_running()
+            finally:
+                if old_stream_bin is None:
+                    os.environ.pop("VEYA_WHISPER_STREAM_BIN", None)
+                else:
+                    os.environ["VEYA_WHISPER_STREAM_BIN"] = old_stream_bin
+                if old_model is None:
+                    os.environ.pop("VEYA_WHISPER_MODEL", None)
+                else:
+                    os.environ["VEYA_WHISPER_MODEL"] = old_model
 
 
 class SessionStopFlushesTrailingTurnIntoARealAnswerTests(unittest.IsolatedAsyncioTestCase):

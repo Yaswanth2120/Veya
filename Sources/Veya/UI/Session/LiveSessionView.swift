@@ -75,24 +75,43 @@ struct LiveSessionView: View {
     /// at once, and never shows "Listening"/"No question detected yet"
     /// while a spoken turn is actually still in flight.
     private enum PipelineStep: CaseIterable {
-        case unavailable, generating, understanding, waitingForSilence, transcribing, listening
+        case unavailable, refining, drafting, generating, understanding, hearingQuestion, waitingForSilence, transcribing, listening
 
         var label: String {
             switch self {
             case .listening: return "Listening"
             case .transcribing: return "Transcribing"
+            case .hearingQuestion: return "Hearing a question…"
             case .waitingForSilence: return "Waiting for speaker to finish"
             case .understanding: return "Understanding question"
+            case .drafting: return "Drafting answer…"
+            case .refining: return "Refining answer…"
             case .generating: return "Generating answer"
             case .unavailable: return "Local AI unavailable"
             }
         }
     }
 
+    /// Section 15: `true` whenever *any* candidate/draft/finalize/
+    /// generation activity is in flight for the turn currently being
+    /// spoken — the one condition that must always suppress the
+    /// completed-answer view and "No question detected yet", so a newer
+    /// turn's work in progress is never hidden behind a stale answer.
+    private var isAnswerRoundInFlight: Bool {
+        conversationState.isGeneratingAnswer
+            || conversationState.isDraftingAnswer
+            || conversationState.isClassifyingQuestion
+            || conversationState.isAnalyzingQuestion
+            || conversationState.candidateState == .candidate
+    }
+
     private var activeStep: PipelineStep {
         if isAnswerIntelligenceUnavailable { return .unavailable }
+        if conversationState.isRefiningAnswer { return .refining }
+        if conversationState.isDraftingAnswer { return .drafting }
         if conversationState.isGeneratingAnswer { return .generating }
         if conversationState.isClassifyingQuestion || conversationState.isAnalyzingQuestion { return .understanding }
+        if conversationState.candidateState == .candidate { return .hearingQuestion }
         if conversationState.turnState == .waitingForSilence { return .waitingForSilence }
         if conversationState.turnState == .speech || conversationState.partialTranscriptText != nil { return .transcribing }
         return .listening
@@ -166,8 +185,10 @@ struct LiveSessionView: View {
 
             // A completed answer is always shown once one exists, even if
             // the pipeline has since moved on to listening for the next
-            // turn — it's only replaced once a *newer* answer completes.
-            if let answer = conversationState.currentAnswer, !conversationState.isGeneratingAnswer, !conversationState.isClassifyingQuestion, !conversationState.isAnalyzingQuestion {
+            // turn — it's only replaced once a *newer* answer completes,
+            // and never shown at all while a newer round (candidate,
+            // draft, refinement, or classic generation) is in flight.
+            if let answer = conversationState.currentAnswer, !isAnswerRoundInFlight {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(answer.question).font(.headline)
                     ForEach(answer.talkingPoints, id: \.self) { point in
@@ -180,6 +201,19 @@ struct LiveSessionView: View {
                 }
             } else {
                 switch activeStep {
+                case .refining, .drafting:
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let questionText = conversationState.finalizedQuestionText ?? conversationState.candidateQuestionText {
+                            Text(questionText).font(.headline)
+                        }
+                        HStack { ProgressView().controlSize(.small); Text(activeStep.label).font(.callout) }
+                        // The draft's own streamed text is the prominent
+                        // content here — it's real generated content, not
+                        // a placeholder, even before the turn finalizes.
+                        if !conversationState.draftAnswerText.isEmpty {
+                            Text(conversationState.draftAnswerText).font(.body)
+                        }
+                    }
                 case .generating:
                     VStack(alignment: .leading, spacing: 6) {
                         HStack { ProgressView().controlSize(.small); Text("Generating answer…").font(.callout) }
@@ -189,6 +223,13 @@ struct LiveSessionView: View {
                     }
                 case .understanding:
                     HStack { ProgressView().controlSize(.small); Text("Understanding question…").font(.callout) }
+                case .hearingQuestion:
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Hearing a question…").font(.callout).foregroundStyle(.secondary)
+                        if let candidateText = conversationState.candidateQuestionText, !candidateText.isEmpty {
+                            Text(candidateText).font(.callout.italic())
+                        }
+                    }
                 case .waitingForSilence:
                     Text("Waiting for the speaker to finish…").font(.callout).foregroundStyle(.secondary)
                 case .unavailable:

@@ -75,6 +75,56 @@ final class ConversationState: ObservableObject {
     @Published private(set) var vadDiagnostics: [VADDiagnosticSample] = []
     private static let maxRetainedVADDiagnostics = 200
 
+    /// Section 15: the evolving "is this an answer request, and how sure
+    /// are we" state, mirroring Python's `QuestionCandidateTracker`
+    /// exactly — inferred here from which candidate/draft events have
+    /// arrived, since Python doesn't send the state name directly.
+    enum QuestionCandidateState: String, Equatable, Sendable {
+        case idle, candidate, drafting, finalized, rejected
+    }
+    @Published private(set) var candidateState: QuestionCandidateState = .idle
+    /// The still-evolving spoken text a candidate/draft was built from —
+    /// distinct from `finalizedQuestionText`, which only ever reflects a
+    /// turn that actually reached a real boundary.
+    @Published private(set) var candidateQuestionText: String?
+    @Published private(set) var finalizedQuestionText: String?
+    /// True between `answer.draft_started`/`answer.draft_replaced` and
+    /// that same sequence's `answer.completed`/`answer.cancelled` — a
+    /// speculative draft may still be replaced or cancelled outright,
+    /// unlike `isGeneratingAnswer`'s older, coarser signal.
+    @Published private(set) var isDraftingAnswer = false
+    /// True specifically when a *finalize*-triggered regeneration is
+    /// superseding a still-visible draft (`answer.draft_replaced` arriving
+    /// after `question.finalized`) — lets the UI say "Refining answer…"
+    /// instead of the more generic "Drafting answer…".
+    @Published private(set) var isRefiningAnswer = false
+    @Published private(set) var draftAnswerText = ""
+    /// The answer-round sequence the currently-visible draft belongs to —
+    /// every draft/delta/replace/cancel event carries its own sequence,
+    /// and anything whose sequence doesn't match this is stale and must
+    /// never mutate visible state (a superseded draft's late events
+    /// arriving after a replacement, for instance).
+    @Published private(set) var draftSequence: Int?
+
+    // MARK: - Developer diagnostics (safe metadata only — see
+    // `VADDiagnosticsView`; never transcript/prompt/answer text)
+
+    /// `"streaming"` or `"degraded_batch"`, from `transcription.start`'s
+    /// response — `nil` before a session has actually started.
+    @Published private(set) var asrProvider: String?
+    @Published private(set) var latestPartialReceivedAt: Date?
+    @Published private(set) var latestFinalReceivedAt: Date?
+    /// Counts every `question.candidate`/`question.updated` for the
+    /// current turn — a rough "how many times did the hypothesis change"
+    /// signal, reset whenever a fresh candidate begins from idle.
+    @Published private(set) var candidateRevisionCount = 0
+    enum DraftTransitionReason: String, Sendable {
+        case started, replaced, cancelled
+    }
+    @Published private(set) var lastDraftTransitionReason: DraftTransitionReason?
+    @Published private(set) var audioChunksSent = 0
+    @Published private(set) var audioChunksDropped = 0
+
     let sessionID: UUID
     private let repository: ConversationRepository
     private var transcriptTask: Task<Void, Never>?
@@ -164,9 +214,22 @@ final class ConversationState: ObservableObject {
 
     func setPartialTranscript(_ text: String?) {
         partialTranscriptText = text
+        if text != nil {
+            latestPartialReceivedAt = Date()
+        }
+    }
+
+    func setASRProvider(_ provider: String?) {
+        asrProvider = provider
+    }
+
+    func setAudioChunkCounts(sent: Int, dropped: Int) {
+        audioChunksSent = sent
+        audioChunksDropped = dropped
     }
 
     func ingestTranscriptSegment(_ segment: TranscriptSegment) async {
+        latestFinalReceivedAt = Date()
         segments.append(segment)
         partialTranscriptText = nil
         try? await repository.save(segment)
@@ -212,6 +275,7 @@ final class ConversationState: ObservableObject {
         isGeneratingAnswer = false
         isClassifyingQuestion = false
         partialAnswerText = nil
+        resetCandidateTracking()
     }
 
     func setPartialAnswer(_ text: String?) {
@@ -222,7 +286,71 @@ final class ConversationState: ObservableObject {
         currentAnswer = answer
         isGeneratingAnswer = false
         partialAnswerText = nil
+        resetCandidateTracking()
         try? await repository.save(answer)
+    }
+
+    // MARK: - Question candidate / draft answer lifecycle (Section 15)
+
+    func setQuestionCandidate(_ text: String) {
+        candidateQuestionText = text
+        candidateRevisionCount += 1
+        if candidateState != .drafting {
+            candidateState = .candidate
+        }
+    }
+
+    func setQuestionUpdated(_ text: String) {
+        candidateQuestionText = text
+        candidateRevisionCount += 1
+    }
+
+    func setQuestionFinalized(_ text: String) {
+        finalizedQuestionText = text
+        candidateState = .finalized
+    }
+
+    /// `isReplacement`: `true` for `answer.draft_replaced`, `false` for
+    /// `answer.draft_started` — a replacement after the turn already
+    /// finalized is a refinement pass, not a fresh speculative draft.
+    func beginDraftAnswer(sequence: Int, isReplacement: Bool) {
+        draftSequence = sequence
+        draftAnswerText = ""
+        isDraftingAnswer = true
+        isRefiningAnswer = isReplacement && candidateState == .finalized
+        lastDraftTransitionReason = isReplacement ? .replaced : .started
+        if candidateState != .finalized {
+            candidateState = .drafting
+        }
+    }
+
+    func appendDraftDelta(_ delta: String, sequence: Int) {
+        guard sequence == draftSequence else { return }  // stale/superseded — never mutate current state
+        draftAnswerText += delta
+    }
+
+    func cancelDraftAnswer(sequence: Int) {
+        guard sequence == draftSequence else { return }
+        draftAnswerText = ""
+        isDraftingAnswer = false
+        isRefiningAnswer = false
+        draftSequence = nil
+        candidateState = .rejected
+        lastDraftTransitionReason = .cancelled
+    }
+
+    /// Clears all candidate/draft transient state — called when a turn's
+    /// answer actually completes (the durable `currentAnswer` takes over)
+    /// or the session ends.
+    func resetCandidateTracking() {
+        candidateState = .idle
+        candidateQuestionText = nil
+        finalizedQuestionText = nil
+        isDraftingAnswer = false
+        isRefiningAnswer = false
+        draftAnswerText = ""
+        draftSequence = nil
+        candidateRevisionCount = 0
     }
 
     // MARK: - Shared

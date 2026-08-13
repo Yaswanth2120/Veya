@@ -26,11 +26,26 @@ calls, which keeps this class trivially unit-testable without any I/O.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
 from .question_detector import QuestionDetector
+
+_PUNCTUATION_RE = re.compile(r"[^\w\s]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize(text: str) -> str:
+    """Loose equality for comparing a streaming partial's wording against
+    the eventual final transcript of the *same* utterance — Whisper's
+    final pass over the accumulated window often cleans up punctuation/
+    capitalization/filler words the rolling partial didn't have yet, and
+    that alone must never be treated as a "materially different"
+    question requiring a wasted regeneration pass."""
+    without_punctuation = _PUNCTUATION_RE.sub("", text.lower())
+    return _WHITESPACE_RE.sub(" ", without_punctuation).strip()
 
 
 class CandidateState(str, Enum):
@@ -100,7 +115,15 @@ class QuestionCandidateTracker:
             self.reset()
 
         score = self._detector.score(stripped)
-        is_extension = bool(self._text) and stripped.startswith(self._text)
+        # A normalized-prefix check, not a raw one: a real incremental ASR
+        # engine frequently revises punctuation/capitalization on the
+        # *already-spoken* portion of an utterance between one partial
+        # and the next (e.g. "what was the bottleneck" -> "What was the
+        # bottleneck,") — a literal `str.startswith` would misread that
+        # as a materially different question and needlessly replace the
+        # draft. Comparing normalized forms tolerates that, and still
+        # correctly treats a real topic change as non-extending.
+        is_extension = bool(self._text) and _normalize(stripped).startswith(_normalize(self._text))
         previous_text = self._text
         self._text = stripped
         effective = self._effective_state()
@@ -152,7 +175,9 @@ class QuestionCandidateTracker:
         stripped = text.strip()
         effective = self._effective_state()
         was_drafting = effective == CandidateState.DRAFTING
-        needs_regeneration = not was_drafting or stripped != self._drafted_text
+        needs_regeneration = not was_drafting or (
+            self._drafted_text is None or _normalize(stripped) != _normalize(self._drafted_text)
+        )
 
         decision = TrackerDecision(state=CandidateState.FINALIZED, text=stripped)
         if needs_regeneration:

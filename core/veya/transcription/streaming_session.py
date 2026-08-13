@@ -41,6 +41,7 @@ class StreamingTranscriptionSession:
         emit_event: EmitEvent,
         on_final_transcript: Optional[Callable[[str, float, float], Awaitable[None]]] = None,
         on_turn_boundary: Optional[Callable[[float], Awaitable[None]]] = None,
+        on_partial_transcript: Optional[Callable[[str, float], Awaitable[None]]] = None,
         vad: Optional[VoiceActivityDetector] = None,
         emit_vad_diagnostics: bool = False,
     ) -> None:
@@ -50,6 +51,14 @@ class StreamingTranscriptionSession:
         self._emit_event = emit_event
         self._on_final_transcript = on_final_transcript
         self._on_turn_boundary = on_turn_boundary
+        # Section 15B: called for every *meaningful* (non-empty,
+        # different-from-last) partial hypothesis — real speculative
+        # question-candidate/draft tracking is driven from here, not
+        # only from `transcript.final`. Never fed into the finalized-turn
+        # assembler (partials are never final transcript) and never
+        # persisted.
+        self._on_partial_transcript = on_partial_transcript
+        self._last_partial_text = ""
         self._vad = vad or VoiceActivityDetector(TurnDetectionConfig(sample_rate_hz=sample_rate_hz))
         self._emit_vad_diagnostics = emit_vad_diagnostics
         self._last_chunk_end_time = 0.0
@@ -132,6 +141,15 @@ class StreamingTranscriptionSession:
 
         if not hypothesis.is_final:
             await self._emit_event("transcript.partial", events.transcript_partial(session_id=self.session_id, text=text))
+            if text != self._last_partial_text:
+                self._last_partial_text = text
+                if self._on_partial_transcript is not None:
+                    try:
+                        await self._on_partial_transcript(text, self._last_chunk_end_time)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - speculative drafting must never break transcription
+                        logger.error("Unhandled %s in on_partial_transcript callback", type(exc).__name__)
             return
 
         # Real timestamps, approximated from cumulative fed audio (the
@@ -141,6 +159,7 @@ class StreamingTranscriptionSession:
         started_at = self._last_final_end_time
         ended_at = max(self._last_chunk_end_time, started_at)
         self._last_final_end_time = ended_at
+        self._last_partial_text = ""
 
         await self._emit_event(
             "transcript.final",

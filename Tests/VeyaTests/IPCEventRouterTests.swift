@@ -255,6 +255,220 @@ struct IPCEventRouterTests {
         #expect(state.vadDiagnostics[0].isInSpeech == true)
     }
 
+    @Test("question.candidate sets candidateQuestionText and candidateState")
+    func questionCandidateRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("question.candidate", #"{"session_id":"\#(sessionID.uuidString)","text":"Tell me about yourself"}"#)
+        )
+
+        #expect(state.candidateQuestionText == "Tell me about yourself")
+        #expect(state.candidateState == .candidate)
+    }
+
+    @Test("question.updated updates candidateQuestionText without changing state")
+    func questionUpdatedRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("question.candidate", #"{"session_id":"\#(sessionID.uuidString)","text":"What was the bottleneck"}"#)
+        )
+        await router.route(
+            try makeEvent(
+                "question.updated",
+                #"{"session_id":"\#(sessionID.uuidString)","text":"What was the bottleneck causing latency"}"#
+            )
+        )
+
+        #expect(state.candidateQuestionText == "What was the bottleneck causing latency")
+    }
+
+    @Test("answer.draft_started begins a fresh draft and moves candidateState to drafting")
+    func answerDraftStartedRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent(
+                "answer.draft_started",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#
+            )
+        )
+
+        #expect(state.isDraftingAnswer == true)
+        #expect(state.draftSequence == 1)
+        #expect(state.candidateState == .drafting)
+    }
+
+    @Test("answer.draft_delta appends to draftAnswerText only for the matching sequence")
+    func answerDraftDeltaRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.draft_started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent(
+                "answer.draft_delta",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"I am ","sequence":1}"#
+            )
+        )
+        await router.route(
+            try makeEvent(
+                "answer.draft_delta",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"a backend engineer.","sequence":1}"#
+            )
+        )
+        // A stale sequence (superseded draft's late delta) must never
+        // mutate the currently-visible draft text.
+        await router.route(
+            try makeEvent(
+                "answer.draft_delta",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"stale","delta":"SHOULD NOT APPEAR","sequence":0}"#
+            )
+        )
+
+        #expect(state.draftAnswerText == "I am a backend engineer.")
+    }
+
+    @Test("answer.draft_replaced discards stale draft text and starts fresh under a new sequence")
+    func answerDraftReplacedRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.draft_started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent("answer.draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"stale content","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent("answer.draft_replaced", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q2","sequence":2}"#)
+        )
+
+        // The old draft's content is gone — a fresh sequence, empty text.
+        #expect(state.draftAnswerText == "")
+        #expect(state.draftSequence == 2)
+
+        // The old sequence's delta arriving late must not resurrect it.
+        await router.route(
+            try makeEvent("answer.draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"late stale delta","sequence":1}"#)
+        )
+        #expect(state.draftAnswerText == "")
+
+        await router.route(
+            try makeEvent("answer.draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q2","delta":"fresh content","sequence":2}"#)
+        )
+        #expect(state.draftAnswerText == "fresh content")
+    }
+
+    @Test("answer.draft_replaced after question.finalized marks the refinement as refining, not a fresh draft")
+    func answerDraftReplacedAfterFinalizeIsRefining() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.draft_started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent(
+                "question.finalized",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","text":"final text","confidence":0.9}"#
+            )
+        )
+        #expect(state.candidateState == .finalized)
+        #expect(state.finalizedQuestionText == "final text")
+
+        await router.route(
+            try makeEvent("answer.draft_replaced", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":2}"#)
+        )
+        #expect(state.isRefiningAnswer == true)
+    }
+
+    @Test("answer.cancelled clears the matching draft, ignoring a stale sequence")
+    func answerCancelledRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.draft_started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent("answer.cancelled", #"{"session_id":"\#(sessionID.uuidString)","question_id":"stale","sequence":0}"#)
+        )
+        #expect(state.isDraftingAnswer == true)  // stale sequence ignored
+
+        await router.route(
+            try makeEvent("answer.cancelled", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        #expect(state.isDraftingAnswer == false)
+        #expect(state.draftAnswerText == "")
+    }
+
+    @Test("a full candidate -> draft -> finalize -> completed sequence never shows a stale/empty state")
+    func fullCandidateToCompletedSequence() async throws {
+        let sessionID = UUID()
+        let questionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("question.candidate", #"{"session_id":"\#(sessionID.uuidString)","text":"Tell me about yourself"}"#)
+        )
+        #expect(state.candidateState == .candidate)
+
+        await router.route(
+            try makeEvent("answer.draft_started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"\#(questionID.uuidString)","sequence":1}"#)
+        )
+        #expect(state.candidateState == .drafting)
+        #expect(state.isDraftingAnswer == true)
+
+        // Real orchestrator traffic always emits `answer.started`
+        // alongside `answer.draft_started` — the older, stable event
+        // `IPCEventRouter` already used for stale-sequence guarding on
+        // `answer.completed`.
+        await router.route(
+            try makeEvent("answer.started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"\#(questionID.uuidString)","sequence":1}"#)
+        )
+
+        await router.route(
+            try makeEvent(
+                "question.finalized",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"\#(questionID.uuidString)","text":"Tell me about yourself","confidence":0.9}"#
+            )
+        )
+        #expect(state.candidateState == .finalized)
+
+        await router.route(
+            try makeEvent(
+                "answer.completed",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"\#(questionID.uuidString)","question":"Tell me about yourself","talking_points":["a point"],"sources":[],"sequence":1,"caveat":""}"#
+            )
+        )
+        #expect(state.currentAnswer != nil)
+        #expect(state.isDraftingAnswer == false)
+        #expect(state.candidateState == .idle)
+    }
+
     @Test("question.classifying sets isClassifyingQuestion, cleared by question.detected")
     func questionClassifyingThenDetected() async throws {
         let sessionID = UUID()

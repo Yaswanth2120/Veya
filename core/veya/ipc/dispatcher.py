@@ -426,6 +426,7 @@ async def _handle_transcription_start(params: dict, context: WorkerContext) -> d
             emit_event=context.emit_event,
             on_final_transcript=orchestrator.handle_final_transcript,
             on_turn_boundary=orchestrator.handle_turn_boundary,
+            on_partial_transcript=orchestrator.handle_partial_transcript,
             emit_vad_diagnostics=emit_vad_diagnostics,
         )
         asr_provider = "streaming"
@@ -437,6 +438,7 @@ async def _handle_transcription_start(params: dict, context: WorkerContext) -> d
             emit_event=context.emit_event,
             on_final_transcript=orchestrator.handle_final_transcript,
             on_turn_boundary=orchestrator.handle_turn_boundary,
+            on_partial_transcript=orchestrator.handle_partial_transcript,
             # Opt-in only (`VEYA_VAD_DIAGNOSTICS=1`) — a real developer
             # diagnostics screen needs real RMS/threshold/state per chunk to
             # verify VAD behavior against the actual microphone, but every

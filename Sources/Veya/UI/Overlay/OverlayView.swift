@@ -24,8 +24,10 @@ struct OverlayView: View {
         VStack(alignment: .leading, spacing: 10) {
             header
 
-            if let answer = conversationState.currentAnswer {
+            if let answer = conversationState.currentAnswer, !conversationState.isDraftingAnswer {
                 answerContent(for: answer)
+            } else if conversationState.isDraftingAnswer {
+                draftContent
             } else {
                 emptyState
             }
@@ -97,6 +99,29 @@ struct OverlayView: View {
             return Array(answer.talkingPoints.prefix(2))
         case .deep, .source, .followUp:
             return answer.talkingPoints
+        }
+    }
+
+    /// A compact draft-in-progress view — the same speculative content
+    /// `LiveSessionView`'s answer panel shows, kept short since the
+    /// overlay must stay small and non-obstructive.
+    @ViewBuilder
+    private var draftContent: some View {
+        if let questionText = conversationState.finalizedQuestionText ?? conversationState.candidateQuestionText {
+            Text(questionText)
+                .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(conversationState.isRefiningAnswer ? "Refining…" : "Drafting…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if !conversationState.draftAnswerText.isEmpty {
+            Text(conversationState.draftAnswerText)
+                .font(.callout)
+                .lineLimit(4)
         }
     }
 

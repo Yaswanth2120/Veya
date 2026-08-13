@@ -125,6 +125,34 @@ final class IPCEventRouter {
             guard let _: QuestionRejectedEventData = decode(event, matching: \.sessionId) else { return }
             state.setClassifyingQuestion(false)
 
+        case "question.candidate":
+            guard let data: QuestionCandidateEventData = decode(event, matching: \.sessionId) else { return }
+            state.setQuestionCandidate(data.text)
+
+        case "question.updated":
+            guard let data: QuestionUpdatedEventData = decode(event, matching: \.sessionId) else { return }
+            state.setQuestionUpdated(data.text)
+
+        case "question.finalized":
+            guard let data: QuestionFinalizedEventData = decode(event, matching: \.sessionId) else { return }
+            state.setQuestionFinalized(data.text)
+
+        case "answer.draft_started":
+            guard let data: AnswerDraftStartedEventData = decode(event, matching: \.sessionId) else { return }
+            state.beginDraftAnswer(sequence: data.sequence, isReplacement: false)
+
+        case "answer.draft_replaced":
+            guard let data: AnswerDraftReplacedEventData = decode(event, matching: \.sessionId) else { return }
+            state.beginDraftAnswer(sequence: data.sequence, isReplacement: true)
+
+        case "answer.draft_delta":
+            guard let data: AnswerDraftDeltaEventData = decode(event, matching: \.sessionId) else { return }
+            state.appendDraftDelta(data.delta, sequence: data.sequence)
+
+        case "answer.cancelled":
+            guard let data: AnswerCancelledEventData = decode(event, matching: \.sessionId) else { return }
+            state.cancelDraftAnswer(sequence: data.sequence)
+
         case "transcript.final":
             guard let data: TranscriptFinalEventData = decode(event, matching: \.sessionId),
                   let sessionUUID = UUID(uuidString: data.sessionId)

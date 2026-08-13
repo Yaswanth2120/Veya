@@ -431,12 +431,15 @@ final class PythonIntelligenceCoordinator: ObservableObject {
 
         transcriptionSetupError = nil
         answerIntelligenceAvailable = startResult.answerIntelligenceAvailable
+        state.setASRProvider(startResult.asrProvider)
         let sender = AudioChunkSender(workerManager: workerManager, sessionId: session.id.uuidString)
         audioChunkSender = sender
         let stream = audioCapture.chunks()
         audioForwardingTask = Task {
             for await chunk in stream {
                 await sender.send(chunk)
+                let counts = await sender.counts()
+                state.setAudioChunkCounts(sent: counts.sent, dropped: counts.dropped)
             }
         }
 

@@ -54,6 +54,7 @@ class TranscriptionSession:
         run_blocking: Optional[Callable[[Callable[[], str]], Awaitable[str]]] = None,
         on_final_transcript: Optional[Callable[[str, float, float], Awaitable[None]]] = None,
         on_turn_boundary: Optional[Callable[[float], Awaitable[None]]] = None,
+        on_partial_transcript: Optional[Callable[[str, float], Awaitable[None]]] = None,
         vad: Optional[VoiceActivityDetector] = None,
         partial_window_seconds: float = 2.0,
         partial_interval_seconds: float = 1.0,
@@ -93,6 +94,13 @@ class TranscriptionSession:
         # faster than, the next Whisper window completing. Failures here
         # must never break transcription either.
         self._on_turn_boundary = on_turn_boundary
+        # Section 15B: degraded-mode equivalent of
+        # `StreamingTranscriptionSession`'s partial routing — even the
+        # batch-CLI fallback's own partial-preview re-transcription can
+        # drive speculative candidate/draft tracking, so a strong prompt
+        # isn't stuck waiting on a full window here either.
+        self._on_partial_transcript = on_partial_transcript
+        self._last_partial_text = ""
         self._vad = vad or VoiceActivityDetector(TurnDetectionConfig(sample_rate_hz=sample_rate_hz))
         # Off by default (real cost: one extra event per audio chunk,
         # every ~0.1-0.5s) — a developer opts in explicitly (see
@@ -213,6 +221,15 @@ class TranscriptionSession:
         if not text or _is_non_speech_marker(text):
             return
         await self._emit_event("transcript.partial", events.transcript_partial(session_id=self.session_id, text=text))
+        if text != self._last_partial_text:
+            self._last_partial_text = text
+            if self._on_partial_transcript is not None:
+                try:
+                    await self._on_partial_transcript(text, self._last_chunk_end_time)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - speculative drafting must never break transcription
+                    logger.error("Unhandled %s in on_partial_transcript callback", type(exc).__name__)
 
     async def _transcribe_and_emit(self, window: bytes, started_at: float, duration: float) -> None:
         raw_text = await self._run_blocking(lambda: self._engine.transcribe_pcm(window, self._buffer.sample_rate_hz))
@@ -231,6 +248,7 @@ class TranscriptionSession:
         # audio, never content Swift already has as final.
         self._partial_buffer.clear()
         self._bytes_since_last_partial = 0
+        self._last_partial_text = ""
 
         ended_at = started_at + duration
         await self._emit_event(

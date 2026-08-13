@@ -79,6 +79,12 @@ actor AudioChunkSender {
         }
     }
 
+    /// Safe metadata only (counts, never audio/transcript content) — for
+    /// developer diagnostics display.
+    func counts() -> (sent: Int, dropped: Int, failed: Int) {
+        (succeededChunkCount, droppedChunkCount, failedChunkCount)
+    }
+
     private func finishInFlight(failed: Bool) {
         inFlightCount -= 1
         if failed {

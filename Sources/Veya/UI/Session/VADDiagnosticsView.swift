@@ -1,32 +1,32 @@
 #if DEBUG
 import SwiftUI
 
-/// DEBUG-only developer panel showing real local-VAD measurements —
-/// raw RMS amplitude vs. the speech threshold, per audio chunk — so
-/// turn-boundary behavior can be verified against the actual microphone
-/// instead of inferred from whether an answer eventually appeared.
-///
-/// Populated only when the Python worker was launched with
-/// `VEYA_VAD_DIAGNOSTICS=1` (see `ipc/dispatcher.py`); empty otherwise,
-/// with a note explaining how to enable it, rather than silently showing
-/// nothing with no explanation.
+/// DEBUG-only developer panel showing real live-session pipeline state —
+/// safe metadata only (counts, timestamps, state names): never raw
+/// audio, transcript text, prompts, answers, document text, or model
+/// output. VAD samples (raw RMS vs. threshold) are only ever populated
+/// when the Python worker was launched with `VEYA_VAD_DIAGNOSTICS=1`
+/// (see `ipc/dispatcher.py`); the rest of this panel is always live.
 struct VADDiagnosticsView: View {
     @ObservedObject var conversationState: ConversationState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            Text("LIVE SESSION DIAGNOSTICS")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+
+            pipelineSummary
+
             HStack {
-                Text("VAD DIAGNOSTICS")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
+                Text("VAD samples").font(.caption2.bold()).foregroundStyle(.secondary)
                 Spacer()
                 Text(conversationState.turnState.rawValue)
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
             }
-
             if conversationState.vadDiagnostics.isEmpty {
-                Text("No samples yet. Set VEYA_VAD_DIAGNOSTICS=1 in the worker's environment to populate this panel from real microphone input.")
+                Text("No samples yet. Set VEYA_VAD_DIAGNOSTICS=1 in the worker's environment to populate this from real microphone input.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {
@@ -42,6 +42,33 @@ struct VADDiagnosticsView: View {
         }
         .padding(10)
         .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var pipelineSummary: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            metadataRow("ASR provider", conversationState.asrProvider ?? "—")
+            metadataRow("Latest partial received", relativeTimestamp(conversationState.latestPartialReceivedAt))
+            metadataRow("Latest final received", relativeTimestamp(conversationState.latestFinalReceivedAt))
+            metadataRow("Candidate tracker state", conversationState.candidateState.rawValue)
+            metadataRow("Candidate revision count", String(conversationState.candidateRevisionCount))
+            metadataRow("Active draft sequence", conversationState.draftSequence.map(String.init) ?? "—")
+            metadataRow("Last draft transition", conversationState.lastDraftTransitionReason?.rawValue ?? "—")
+            metadataRow("Audio chunks sent / dropped", "\(conversationState.audioChunksSent) / \(conversationState.audioChunksDropped)")
+        }
+    }
+
+    private func metadataRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).font(.caption2.monospaced())
+        }
+    }
+
+    private func relativeTimestamp(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        let seconds = Date().timeIntervalSince(date)
+        return String(format: "%.1fs ago", max(0, seconds))
     }
 
     private func row(for sample: ConversationState.VADDiagnosticSample) -> some View {

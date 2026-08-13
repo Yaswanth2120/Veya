@@ -388,6 +388,170 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await orchestrator.close()
 
 
+class PartialTranscriptDrivenDraftingTests(unittest.IsolatedAsyncioTestCase):
+    """Section 15B: `handle_partial_transcript` — the real streaming-ASR
+    entry point — must be able to start a draft on its own, with no
+    `transcript.final`/VAD boundary ever involved."""
+
+    async def test_a_partial_hypothesis_alone_starts_a_draft_with_no_final_or_boundary(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: about me\nPOINTS:\n- a point\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("Tell me about yourself", 2.0)
+
+        names = emitter.names()
+        self.assertEqual(names[0], "question.candidate")
+        self.assertIn("answer.draft_started", names)
+        self.assertNotIn("question.detected", names)
+        self.assertNotIn("question.finalized", names)
+        await emitter.wait_for_event("answer.draft_delta")
+        await orchestrator.close()
+
+    async def test_walk_me_through_your_resume_also_drafts_from_a_partial_alone(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: resume walkthrough\nPOINTS:\n- a point\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("Walk me through your resume", 2.0)
+        self.assertIn("answer.draft_started", emitter.names())
+        self.assertNotIn("question.detected", emitter.names())
+        await orchestrator.close()
+
+    async def test_a_partial_extension_updates_the_same_candidate_without_a_duplicate_draft(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: ok\nPOINTS:\n- a\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("What was the bottleneck causing latency", 2.0)
+        await orchestrator.handle_partial_transcript("What was the bottleneck causing latency in your", 3.0)
+        await orchestrator.handle_partial_transcript(
+            "What was the bottleneck causing latency in your YOLOv5 inference pipeline", 4.0
+        )
+
+        names = emitter.names()
+        self.assertEqual(names.count("answer.draft_started"), 1)
+        self.assertEqual(names.count("answer.draft_replaced"), 0)
+        self.assertIn("question.updated", names)
+        await orchestrator.close()
+
+    async def test_a_materially_different_partial_replaces_the_draft_not_duplicates_it(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: ok\nPOINTS:\n- a\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("Tell me about yourself", 2.0)
+        await orchestrator.handle_partial_transcript("What time is the meeting tomorrow", 4.0)
+        await emitter.wait_for_nth_event("answer.completed", 1)
+
+        names = emitter.names()
+        self.assertEqual(names.count("answer.draft_started"), 1)
+        self.assertEqual(names.count("answer.draft_replaced"), 1)
+        # Exactly one answer ever completes — the replacement's, not a
+        # leftover from the superseded first draft (which may not even
+        # have started streaming before being cancelled).
+        self.assertEqual(names.count("answer.completed"), 1)
+        self.assertIn("meeting", provider.prompts[-1])
+        await orchestrator.close()
+
+    async def test_a_final_hypothesis_reconciles_with_an_active_partial_driven_draft_without_a_wasted_regeneration(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: ok\nPOINTS:\n- a\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("Tell me about yourself", 2.0)
+        await emitter.wait_for_event("answer.draft_started")
+
+        await orchestrator.handle_final_transcript("Tell me about yourself", 0.0, 3.0)
+        await orchestrator.handle_turn_boundary(3.0)
+        detected = await emitter.wait_for_event("question.finalized")
+        await emitter.wait_for_event("answer.completed")
+
+        self.assertEqual(detected["text"], "Tell me about yourself")
+        # The final text (once normalized) matches what the draft was
+        # already generated from — no second generation round.
+        self.assertEqual(emitter.names().count("answer.started"), 1)
+        self.assertEqual(emitter.names().count("answer.draft_replaced"), 0)
+        await orchestrator.close()
+
+    async def test_a_final_hypothesis_with_materially_more_text_reconciles_via_one_replacement(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: ok\nPOINTS:\n- a\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("What was the bottleneck", 2.0)
+        await emitter.wait_for_event("answer.draft_started")
+
+        await orchestrator.handle_final_transcript(
+            "What was the bottleneck causing latency in your YOLOv5 inference pipeline?", 0.0, 4.0
+        )
+        await orchestrator.handle_turn_boundary(4.0)
+        await emitter.wait_for_event("question.finalized")
+        await emitter.wait_for_event("answer.completed")
+
+        names = emitter.names()
+        self.assertEqual(names.count("answer.draft_started"), 1)
+        self.assertEqual(names.count("answer.draft_replaced"), 1)  # the finalize-triggered refinement
+        self.assertEqual(names.count("answer.completed"), 1)  # never two competing answers
+        await orchestrator.close()
+
+    async def test_repeated_identical_partials_do_not_duplicate_anything(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ok\nPOINTS:\n- a\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("Tell me about yourself", 2.0)
+        await orchestrator.handle_partial_transcript("Tell me about yourself", 2.5)  # identical text, re-sent
+        await orchestrator.handle_partial_transcript("Tell me about yourself", 3.0)
+
+        self.assertEqual(emitter.names().count("answer.draft_started"), 1)
+        self.assertEqual(emitter.names().count("question.candidate"), 1)
+        await orchestrator.close()
+
+    async def test_ordinary_speech_via_partial_never_starts_a_draft_or_is_remembered(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider()
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("we moved the auth service first", 2.0)
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(emitter.events, [])
+        # Never persisted into conversation memory unless/until finalized.
+        self.assertEqual(orchestrator._recent_transcript_fragments, [])
+        await orchestrator.close()
+
+    async def test_an_unfinalized_partial_candidate_is_never_persisted_as_conversation_context(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: ok\nPOINTS:\n- a\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        # A strong partial starts a draft, but the turn never finalizes
+        # (e.g. the interviewer trails off / the session simply moves on).
+        await orchestrator.handle_partial_transcript("Tell me about yourself", 2.0)
+        await emitter.wait_for_event("answer.draft_started")
+        self.assertEqual(orchestrator._recent_transcript_fragments, [])
+        await orchestrator.close()
+
+
 # A genuinely realistic ambiguous turn under the *default* scoring
 # config: a mid-sentence interrogative ("how") that isn't the leading
 # word, so it scores via `mid_sentence_interrogative_score` (0.4) alone —

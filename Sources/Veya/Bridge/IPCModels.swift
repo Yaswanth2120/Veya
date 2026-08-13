@@ -323,6 +323,12 @@ struct OkResult: Decodable, Sendable {
 struct TranscriptionStartResult: Decodable, Sendable {
     let ok: Bool
     let answerIntelligenceAvailable: Bool
+    /// `"streaming"` (the real incremental engine) or `"degraded_batch"`
+    /// (the older fixed-window whisper-cli fallback) — surfaced honestly
+    /// in developer diagnostics rather than left ambiguous. Optional only
+    /// for decode resilience against an older/newer worker version; a
+    /// worker on this protocol version always sends it.
+    let asrProvider: String?
 }
 
 struct PingResult: Decodable, Sendable {
@@ -406,6 +412,50 @@ struct QuestionDetectedEventData: Decodable, Sendable {
     let text: String
     let confidence: Double
     let detectedAt: Double
+}
+
+// MARK: - Question candidate / draft answer lifecycle (Section 15)
+
+struct QuestionCandidateEventData: Decodable, Sendable {
+    let sessionId: String
+    let text: String
+}
+
+struct QuestionUpdatedEventData: Decodable, Sendable {
+    let sessionId: String
+    let text: String
+}
+
+struct QuestionFinalizedEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let text: String
+    let confidence: Double
+}
+
+struct AnswerDraftStartedEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let sequence: Int
+}
+
+struct AnswerDraftDeltaEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let delta: String
+    let sequence: Int
+}
+
+struct AnswerDraftReplacedEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let sequence: Int
+}
+
+struct AnswerCancelledEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let sequence: Int
 }
 
 /// `sequence` is a per-session, per-answer-round counter (Python:

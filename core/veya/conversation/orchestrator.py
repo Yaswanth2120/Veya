@@ -129,15 +129,33 @@ class ConversationOrchestrator:
             await self._process_finalized_turn(finalized_turn)
             return
 
-        # The turn is still open (no VAD boundary reached it yet). Drive
-        # the candidate tracker with whatever's accumulated so far — it
-        # may already read as a complete, strong prompt on its own, in
-        # which case a draft answer starts *now*, before any silence
-        # endpoint (see `_SPECULATIVE_FINALIZE_DEBOUNCE_SECONDS` above).
-        pending_text = self._turn_assembler.peek_pending_text()
-        if not pending_text:
+        # The turn is still open (no VAD boundary reached it yet). If real
+        # streaming partials are arriving (`handle_partial_transcript`),
+        # they already drive candidate tracking far more responsively
+        # than waiting for the next `transcript.final` fragment — this is
+        # a fallback for engines that only ever produce finals (the
+        # degraded batch-CLI path), so a strong prompt still isn't stuck
+        # waiting purely on a VAD boundary there either.
+        await self._advance_candidate_tracker(self._turn_assembler.peek_pending_text())
+
+    async def handle_partial_transcript(self, text: str, ended_at: float) -> None:
+        """Called for every meaningful (non-empty, changed) streaming ASR
+        partial hypothesis — never persisted, never fed into
+        `TurnAssembler` (partials are never final transcript). This is
+        now the primary driver of speculative candidate/draft tracking:
+        a high-confidence prompt can start drafting from a partial alone,
+        well before any `transcript.final` or VAD boundary arrives.
+        `handle_final_transcript`/`handle_turn_boundary` still own the
+        actual turn finalization and reconciliation."""
+        if not self.answer_intelligence_available:
             return
-        decision = self._candidate_tracker.on_pending_text_changed(pending_text)
+        await self._advance_candidate_tracker(text)
+
+    async def _advance_candidate_tracker(self, pending_text: str) -> None:
+        stripped = pending_text.strip()
+        if not stripped:
+            return
+        decision = self._candidate_tracker.on_pending_text_changed(stripped)
 
         if decision.emit_candidate:
             await self._emit_event("question.candidate", events.question_candidate(session_id=self.session_id, text=decision.text))
