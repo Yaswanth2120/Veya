@@ -22,6 +22,8 @@ from .answer_generation import generate_answer
 from .context_builder import render_prompt
 from .models import SessionContext
 from .question_detector import QuestionDetector
+from .semantic_classifier import LOW_CONFIDENCE_REJECT_BOUND, classify_turn
+from .turn_assembler import TurnAssembler
 from ..ipc import events
 from ..knowledge.models import RetrievedChunk
 from ..knowledge.retrieval import KnowledgeRetriever, chunk_sources
@@ -33,6 +35,7 @@ logger = logging.getLogger("veya.conversation")
 EmitEvent = Callable[[str, dict], Awaitable[None]]
 
 _GENERATION_FAILED_MESSAGE = "Answer generation failed — the local LLM provider became unavailable mid-response."
+_MAX_RECENT_TRANSCRIPT_CHARACTERS = 2_400
 
 
 class ConversationOrchestrator:
@@ -62,6 +65,16 @@ class ConversationOrchestrator:
         self._retriever = retriever
         self._sequence = 0
         self._active_answer_task: Optional[asyncio.Task] = None
+        # The question detector remains intentionally fast and local, but
+        # answer generation receives bounded preceding speech context. This
+        # prevents a Whisper window boundary from stripping the subject from
+        # an otherwise valid spoken prompt.
+        self._recent_transcript_fragments: list[str] = []
+        # Section 14: coalesces `transcript.final` fragments spanning
+        # multiple Whisper windows into one complete spoken turn before
+        # question detection/classification ever sees it — the fix for
+        # the "each fragment judged independently" bug.
+        self._turn_assembler = TurnAssembler()
 
     @property
     def answer_intelligence_available(self) -> bool:
@@ -72,27 +85,75 @@ class ConversationOrchestrator:
         never for partials. A no-op session-wide if no LLM provider is
         available: detecting questions nobody can answer would just be a
         confusing dead-end UI state (see
-        docs/QUESTION_AND_ANSWER_INTELLIGENCE.md's fallback behavior)."""
+        docs/QUESTION_AND_ANSWER_INTELLIGENCE.md's fallback behavior).
+        Feeds the fragment into the turn assembler — a turn only reaches
+        classification once a real endpoint (VAD boundary/session stop/
+        max duration) finalizes it, never on every individual fragment."""
         if not self.answer_intelligence_available:
             return
 
-        result = self._detector.detect(text)
-        if result is None:
-            return
+        finalized_turn = self._turn_assembler.add_fragment(text, started_at, ended_at)
+        if finalized_turn is not None:
+            await self._process_finalized_turn(finalized_turn)
 
+    async def handle_turn_boundary(self, boundary_time: float) -> None:
+        """Called by `TranscriptionSession` when local VAD detects a turn
+        has ended at audio-timeline position `boundary_time`. If the
+        fragment covering that boundary hasn't arrived yet (Whisper
+        transcription lags real-time), this only records the boundary —
+        `handle_final_transcript` finalizes once that fragment shows up."""
+        if not self.answer_intelligence_available:
+            return
+        finalized_turn = self._turn_assembler.request_finalize_at(boundary_time)
+        if finalized_turn is not None:
+            await self._process_finalized_turn(finalized_turn)
+
+    async def _process_finalized_turn(self, turn_text: str) -> bool:
+        """Returns `True` if this finalized turn started a fresh answer
+        generation (so callers like `close()` know not to immediately
+        cancel it again right after)."""
+        self._remember_transcript(turn_text)
+
+        # Only announce "classifying" when the (slower) semantic stage is
+        # actually about to run — a clear deterministic verdict is fast
+        # enough that a transient UI state would just flicker.
+        detected_score = self._detector.score(turn_text)
+        will_use_semantic_stage = self._llm_provider is not None and LOW_CONFIDENCE_REJECT_BOUND <= detected_score < self._detector.confidence_threshold
+        if will_use_semantic_stage:
+            await self._emit_event("question.classifying", events.question_classifying(session_id=self.session_id))
+
+        classification = await classify_turn(turn_text, self._detector, self._llm_provider)
+        if not classification.is_answer_request:
+            if will_use_semantic_stage:
+                await self._emit_event("question.rejected", events.question_rejected(session_id=self.session_id))
+            return False
+
+        question_text = classification.normalized_question or turn_text
         question_id = str(uuid.uuid4())
         await self._emit_event(
             "question.detected",
             events.question_detected(
                 session_id=self.session_id,
                 question_id=question_id,
-                text=result.text,
-                confidence=result.confidence,
+                text=question_text,
+                confidence=classification.confidence,
                 detected_at=time.time(),
             ),
         )
 
-        await self._start_answer_generation(question_id=question_id, question_text=result.text)
+        await self._start_answer_generation(question_id=question_id, question_text=question_text)
+        return True
+
+    def _remember_transcript(self, text: str) -> None:
+        self._recent_transcript_fragments.append(text.strip())
+        while sum(len(item) + 1 for item in self._recent_transcript_fragments) > _MAX_RECENT_TRANSCRIPT_CHARACTERS:
+            self._recent_transcript_fragments.pop(0)
+
+    def _recent_conversation_block(self) -> str:
+        # The final fragment is the question itself, which is sent in a
+        # dedicated field below. The preceding speech is useful context; it
+        # also avoids needlessly repeating the question in the prompt.
+        return "\n".join(self._recent_transcript_fragments[:-1])
 
     async def _start_answer_generation(self, question_id: str, question_text: str) -> None:
         # A new question always supersedes whatever answer was still
@@ -112,7 +173,13 @@ class ConversationOrchestrator:
 
         document_context_block = self._retriever.build_context_block(retrieved) if retrieved and self._retriever else ""
         memory_context_block = "\n".join(f"- {text}" for text in self._memory_texts)
-        prompt = render_prompt(self._session_context, question_text, document_context_block=document_context_block, memory_context_block=memory_context_block)
+        prompt = render_prompt(
+            self._session_context,
+            question_text,
+            document_context_block=document_context_block,
+            memory_context_block=memory_context_block,
+            recent_conversation_block=self._recent_conversation_block(),
+        )
 
         self._active_answer_task = asyncio.create_task(
             self._run_answer_generation(
@@ -197,4 +264,20 @@ class ConversationOrchestrator:
             pass
 
     async def close(self) -> None:
-        await self.cancel_active_answer()
+        # Flushes whatever the turn assembler already has buffered from
+        # completed windows — `transcription.stop` only reaches here after
+        # every prior `transcription.audio_chunk` RPC has already been
+        # processed, so this covers everything except the very last
+        # partial trailing window, which `TranscriptionSession.close()`'s
+        # own VAD-triggered flush (still reachable via the bound
+        # `on_turn_boundary` callback even after this method returns)
+        # covers separately. If this starts a fresh answer generation for
+        # the flushed turn, it must not be immediately cancelled by the
+        # unconditional `cancel_active_answer()` below — that call is only
+        # for a *previous*, now-stale generation.
+        finalized_turn = self._turn_assembler.flush()
+        started_final_answer = False
+        if finalized_turn is not None:
+            started_final_answer = await self._process_finalized_turn(finalized_turn)
+        if not started_final_answer:
+            await self.cancel_active_answer()

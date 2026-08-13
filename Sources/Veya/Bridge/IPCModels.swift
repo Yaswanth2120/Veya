@@ -349,6 +349,21 @@ struct LLMStatusResult: Decodable, Sendable {
 
 // MARK: - Event payloads (mirror core/veya/ipc/events.py field-for-field)
 
+// MARK: - Turn detection (Section 14)
+
+struct TurnStateEventData: Decodable, Sendable {
+    let sessionId: String
+    let state: String
+}
+
+struct QuestionClassifyingEventData: Decodable, Sendable {
+    let sessionId: String
+}
+
+struct QuestionRejectedEventData: Decodable, Sendable {
+    let sessionId: String
+}
+
 struct WorkerReadyEventData: Decodable, Sendable {
     let protocolVersion: Int
     let workerVersion: String

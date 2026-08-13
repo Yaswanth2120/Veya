@@ -42,6 +42,21 @@ final class ConversationState: ObservableObject {
     /// Transient (never persisted) partial answer text from `answer.delta`.
     @Published private(set) var partialAnswerText: String?
 
+    /// Section 14: the raw local-VAD-derived turn state — never claims
+    /// AI understanding, only what the audio itself looks like right now.
+    enum TurnState: String, Equatable, Sendable {
+        case listening
+        case speech
+        case waitingForSilence = "waiting_for_silence"
+    }
+    @Published private(set) var turnState: TurnState = .listening
+    /// True between `question.classifying` and either `question.detected`
+    /// or `question.rejected` — the finalized turn is ambiguous enough
+    /// that the (slower) semantic classification stage is running. Only
+    /// ever set by the Python-driven pipeline; the Swift fallback's
+    /// canned pipeline has no equivalent classification step.
+    @Published private(set) var isClassifyingQuestion = false
+
     let sessionID: UUID
     private let repository: ConversationRepository
     private var transcriptTask: Task<Void, Never>?
@@ -139,9 +154,18 @@ final class ConversationState: ObservableObject {
         try? await repository.save(segment)
     }
 
+    func setTurnState(_ newState: TurnState) {
+        turnState = newState
+    }
+
+    func setClassifyingQuestion(_ classifying: Bool) {
+        isClassifyingQuestion = classifying
+    }
+
     func ingestDetectedQuestion(_ question: DetectedQuestion) async {
         detectedQuestions.append(question)
         isAnalyzingQuestion = true
+        isClassifyingQuestion = false
         try? await repository.save(question)
     }
 
@@ -161,6 +185,7 @@ final class ConversationState: ObservableObject {
     func cancelPendingAnswerActivity() {
         isAnalyzingQuestion = false
         isGeneratingAnswer = false
+        isClassifyingQuestion = false
         partialAnswerText = nil
     }
 

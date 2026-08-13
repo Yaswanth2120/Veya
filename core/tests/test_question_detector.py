@@ -16,6 +16,18 @@ class QuestionDetectorTests(unittest.TestCase):
         result = detector.detect("What time does the migration actually finish")
         self.assertIsNotNone(result)
 
+    def test_interview_prompt_tell_me_about_yourself_is_detected_without_a_question_mark(self):
+        result = QuestionDetector().detect("Tell me about yourself.")
+        self.assertIsNotNone(result)
+
+    def test_numbered_spoken_explain_prompt_is_detected_without_a_question_mark(self):
+        result = QuestionDetector().detect("Q1, explain the deployment risk scoring algorithm in DeployGuard AI")
+        self.assertIsNotNone(result)
+
+    def test_walk_me_through_your_resume_is_detected_without_a_question_mark(self):
+        result = QuestionDetector().detect("Walk me through your resume.")
+        self.assertIsNotNone(result)
+
     def test_declarative_sentence_is_rejected(self):
         detector = QuestionDetector()
         result = detector.detect("We moved the auth service first since everything else depended on it.")

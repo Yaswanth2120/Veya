@@ -19,6 +19,21 @@ _INTERROGATIVE_STARTS = {
 }
 _LEADING_FILLER_WORDS = {"so", "um", "uh", "well", "okay", "ok", "and", "but"}
 
+# Spoken interview prompts are often statements rather than grammatical
+# questions: "Tell me about yourself", "Walk me through your resume", or
+# "Q1, explain the deployment policy". Whisper also frequently strips the
+# question mark, so treating only written interrogatives as questions makes
+# real microphone use fail in exactly the situations this product is for.
+# Keep this deliberately narrow: these are request-for-an-answer phrases,
+# not every imperative sentence in ordinary conversation.
+_SPOKEN_PROMPT_RE = re.compile(
+    r"^(?:(?:q|question)\s*\d+\s*[,.:;-]?\s*)?"
+    r"(?:please\s+)?"
+    r"(?:tell\s+me(?:\s+about)?|walk\s+me\s+through|talk\s+me\s+through|"
+    r"explain|describe|give\s+me|help\s+me\s+understand|outline|compare|share)\b",
+    re.IGNORECASE,
+)
+
 _PUNCTUATION_RE = re.compile(r"[^\w\s]")
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -29,6 +44,7 @@ class QuestionDetectionConfig:
     ends_with_question_mark_score: float = 0.6
     interrogative_start_score: float = 0.65
     contains_question_mark_score: float = 0.2
+    spoken_prompt_score: float = 0.75
     max_recent_questions_tracked: int = 20
 
 
@@ -42,6 +58,17 @@ class QuestionDetector:
     def __init__(self, config: Optional[QuestionDetectionConfig] = None) -> None:
         self._config = config or QuestionDetectionConfig()
         self._recent_normalized_texts: List[str] = []
+
+    @property
+    def confidence_threshold(self) -> float:
+        return self._config.confidence_threshold
+
+    def score(self, text: str) -> float:
+        """The raw deterministic score for `text`, without the confidence
+        threshold or duplicate-suppression `detect` applies — used by
+        `semantic_classifier.py` to decide whether a finalized turn is
+        clear enough to skip the (slower) Ollama classification stage."""
+        return self._score(text.strip())
 
     def detect(self, text: str) -> Optional[DetectedQuestionResult]:
         stripped = text.strip()
@@ -75,6 +102,9 @@ class QuestionDetector:
             first_word = words[1].strip(".,!?")
         if first_word in _INTERROGATIVE_STARTS:
             score += self._config.interrogative_start_score
+
+        if _SPOKEN_PROMPT_RE.match(text):
+            score += self._config.spoken_prompt_score
 
         return min(score, 1.0)
 

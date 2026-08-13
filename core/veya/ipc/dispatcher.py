@@ -394,6 +394,7 @@ async def _handle_transcription_start(params: dict, context: WorkerContext) -> d
         engine=engine,
         emit_event=context.emit_event,
         on_final_transcript=orchestrator.handle_final_transcript,
+        on_turn_boundary=orchestrator.handle_turn_boundary,
     )
     logger.info("transcription.start session_id=%s sample_rate_hz=%s", session_id, sample_rate_hz)
     return {"ok": True, "answer_intelligence_available": llm_provider is not None}

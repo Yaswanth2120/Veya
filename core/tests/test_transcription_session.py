@@ -44,6 +44,18 @@ def make_pcm(num_bytes: int) -> bytes:
     return b"\x00" * num_bytes
 
 
+def make_loud_pcm(num_bytes: int) -> bytes:
+    """Non-silent 16-bit PCM (alternating +/- high amplitude) — used to
+    exercise VAD/turn-detection, which `make_pcm`'s all-zero bytes never
+    trigger (deliberately, so every pre-existing test above is
+    unaffected by VAD's presence unless it opts in to loud audio)."""
+    import struct
+
+    count = num_bytes // 2
+    samples = ([6000, -6000] * ((count + 1) // 2))[:count]
+    return struct.pack("<" + "h" * count, *samples)
+
+
 class TranscriptionSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_chunk_below_window_size_does_not_transcribe(self):
         engine = FakeEngine(["should not be used"])
@@ -198,6 +210,54 @@ class TranscriptionSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(engine.calls), 1)
         self.assertEqual(emitter.events[0][1]["text"], "partial tail")
+
+    async def test_speech_then_silence_emits_turn_state_events_and_calls_on_turn_boundary(self):
+        from veya.transcription.turn_detection import TurnDetectionConfig, VoiceActivityDetector
+
+        engine = FakeEngine([])
+        emitter = RecordingEmitter()
+        boundary_calls: list[float] = []
+
+        async def on_turn_boundary(boundary_time: float) -> None:
+            boundary_calls.append(boundary_time)
+
+        vad = VoiceActivityDetector(TurnDetectionConfig(silence_duration_seconds=1.0, min_speech_duration_seconds=0.2))
+        session = TranscriptionSession(
+            session_id="s1", sample_rate_hz=100, engine=engine, emit_event=emitter,
+            run_blocking=immediate_run_blocking, on_turn_boundary=on_turn_boundary, vad=vad,
+        )
+
+        await session.handle_chunk(0, 0.0, 0.5, make_loud_pcm(100))
+        await session.handle_chunk(1, 0.5, 0.5, make_pcm(100))  # silence candidate
+        await session.handle_chunk(2, 1.0, 0.5, make_pcm(100))  # finalizes at 1.0s silence
+
+        state_events = [data["state"] for name, data in emitter.events if name == "turn.state"]
+        self.assertEqual(state_events, ["speech", "waiting_for_silence", "listening"])
+        self.assertEqual(boundary_calls, [1.5])
+
+        await session.close()
+
+    async def test_close_force_finalizes_an_open_turn_and_calls_on_turn_boundary(self):
+        from veya.transcription.turn_detection import TurnDetectionConfig, VoiceActivityDetector
+
+        engine = FakeEngine([])
+        emitter = RecordingEmitter()
+        boundary_calls: list[float] = []
+
+        async def on_turn_boundary(boundary_time: float) -> None:
+            boundary_calls.append(boundary_time)
+
+        vad = VoiceActivityDetector(TurnDetectionConfig(silence_duration_seconds=5.0, min_speech_duration_seconds=0.2))
+        session = TranscriptionSession(
+            session_id="s1", sample_rate_hz=100, engine=engine, emit_event=emitter,
+            run_blocking=immediate_run_blocking, on_turn_boundary=on_turn_boundary, vad=vad,
+        )
+
+        await session.handle_chunk(0, 0.0, 0.5, make_loud_pcm(100))
+        self.assertEqual(boundary_calls, [])  # no silence endpoint reached yet
+
+        await session.close()
+        self.assertEqual(boundary_calls, [0.5])  # trailing open turn flushed at session end
 
     async def test_engine_exception_does_not_crash_the_session_or_leak_message(self):
         class BoomEngine:

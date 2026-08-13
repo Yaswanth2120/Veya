@@ -67,24 +67,31 @@ struct LiveSessionView: View {
 
     // MARK: - Pipeline status
 
+    /// The six honest states the build prompt requires — computed in
+    /// strict priority order so the UI never shows two conflicting things
+    /// at once, and never shows "Listening"/"No question detected yet"
+    /// while a spoken turn is actually still in flight.
     private enum PipelineStep: CaseIterable {
-        case listening, transcribing, detecting, generating
+        case unavailable, generating, understanding, waitingForSilence, transcribing, listening
 
         var label: String {
             switch self {
             case .listening: return "Listening"
             case .transcribing: return "Transcribing"
-            case .detecting: return "Detecting question"
+            case .waitingForSilence: return "Waiting for speaker to finish"
+            case .understanding: return "Understanding question"
             case .generating: return "Generating answer"
+            case .unavailable: return "Local AI unavailable"
             }
         }
     }
 
-    private var activeStep: PipelineStep? {
-        guard conversationState.phase == .live else { return nil }
+    private var activeStep: PipelineStep {
+        if isAnswerIntelligenceUnavailable { return .unavailable }
         if conversationState.isGeneratingAnswer { return .generating }
-        if conversationState.isAnalyzingQuestion { return .detecting }
-        if conversationState.partialTranscriptText != nil { return .transcribing }
+        if conversationState.isClassifyingQuestion || conversationState.isAnalyzingQuestion { return .understanding }
+        if conversationState.turnState == .waitingForSilence { return .waitingForSilence }
+        if conversationState.turnState == .speech || conversationState.partialTranscriptText != nil { return .transcribing }
         return .listening
     }
 
@@ -105,18 +112,13 @@ struct LiveSessionView: View {
 
     private var pipelineStatusStrip: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                ForEach(Array(PipelineStep.allCases.enumerated()), id: \.offset) { index, step in
-                    Text(step.label)
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(activeStep == step ? Color.accentColor.opacity(0.2) : Color.clear, in: Capsule())
-                        .foregroundStyle(activeStep == step ? Color.accentColor : .secondary)
-                    if index < PipelineStep.allCases.count - 1 {
-                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-                    }
-                }
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(activeStep == .unavailable ? Color.orange : Color.accentColor)
+                    .frame(width: 8, height: 8)
+                Text(activeStep.label)
+                    .font(.caption.bold())
+                    .foregroundStyle(activeStep == .unavailable ? Color.orange : Color.accentColor)
                 Spacer()
             }
 
@@ -159,7 +161,10 @@ struct LiveSessionView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("ANSWER").font(.caption.bold()).foregroundStyle(.secondary)
 
-            if let answer = conversationState.currentAnswer, !conversationState.isGeneratingAnswer {
+            // A completed answer is always shown once one exists, even if
+            // the pipeline has since moved on to listening for the next
+            // turn — it's only replaced once a *newer* answer completes.
+            if let answer = conversationState.currentAnswer, !conversationState.isGeneratingAnswer, !conversationState.isClassifyingQuestion, !conversationState.isAnalyzingQuestion {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(answer.question).font(.headline)
                     ForEach(answer.talkingPoints, id: \.self) { point in
@@ -170,20 +175,27 @@ struct LiveSessionView: View {
                         ForEach(answer.sources, id: \.self) { Text("• \($0)").font(.caption) }
                     }
                 }
-            } else if conversationState.isGeneratingAnswer {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack { ProgressView().controlSize(.small); Text("Generating answer…").font(.callout) }
-                    if let partial = conversationState.partialAnswerText, !partial.isEmpty {
-                        Text(partial).font(.callout).foregroundStyle(.secondary)
-                    }
-                }
-            } else if conversationState.isAnalyzingQuestion {
-                HStack { ProgressView().controlSize(.small); Text("Analyzing detected question…").font(.callout) }
-            } else if isAnswerIntelligenceUnavailable {
-                Text("Local AI isn't configured — questions will be detected in the transcript, but no answer will be generated.")
-                    .font(.callout).foregroundStyle(.secondary)
             } else {
-                Text("No question detected yet.").font(.callout).foregroundStyle(.secondary)
+                switch activeStep {
+                case .generating:
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack { ProgressView().controlSize(.small); Text("Generating answer…").font(.callout) }
+                        if let partial = conversationState.partialAnswerText, !partial.isEmpty {
+                            Text(partial).font(.callout).foregroundStyle(.secondary)
+                        }
+                    }
+                case .understanding:
+                    HStack { ProgressView().controlSize(.small); Text("Understanding question…").font(.callout) }
+                case .waitingForSilence:
+                    Text("Waiting for the speaker to finish…").font(.callout).foregroundStyle(.secondary)
+                case .unavailable:
+                    Text("Local AI isn't configured — questions will be detected in the transcript, but no answer will be generated.")
+                        .font(.callout).foregroundStyle(.secondary)
+                case .transcribing:
+                    Text("Listening for a question…").font(.callout).foregroundStyle(.secondary)
+                case .listening:
+                    Text("No question detected yet.").font(.callout).foregroundStyle(.secondary)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)

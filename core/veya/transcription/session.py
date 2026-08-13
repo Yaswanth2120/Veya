@@ -23,6 +23,7 @@ from typing import Awaitable, Callable, Optional
 from .engine import TranscriptionEngine
 from .overlap import dedupe_overlap
 from .rolling_buffer import RollingWindowBuffer, RollingWindowConfig
+from .turn_detection import TurnDetectionConfig, TurnSignal, VoiceActivityDetector
 from ..ipc import events
 from ..ipc.errors import ErrorCode, ProtocolError
 
@@ -52,6 +53,8 @@ class TranscriptionSession:
         emit_event: EmitEvent,
         run_blocking: Optional[Callable[[Callable[[], str]], Awaitable[str]]] = None,
         on_final_transcript: Optional[Callable[[str, float, float], Awaitable[None]]] = None,
+        on_turn_boundary: Optional[Callable[[float], Awaitable[None]]] = None,
+        vad: Optional[VoiceActivityDetector] = None,
     ) -> None:
         self.session_id = session_id
         self._buffer = RollingWindowBuffer(RollingWindowConfig(sample_rate_hz=sample_rate_hz))
@@ -65,6 +68,14 @@ class TranscriptionSession:
         # it never sees partials. Failures here must never break
         # transcription itself.
         self._on_final_transcript = on_final_transcript
+        # Section 14: called with an audio-timeline boundary time whenever
+        # local VAD detects a turn has ended (silence endpoint or the
+        # max-turn-duration safety cap) — independent of, and usually
+        # faster than, the next Whisper window completing. Failures here
+        # must never break transcription either.
+        self._on_turn_boundary = on_turn_boundary
+        self._vad = vad or VoiceActivityDetector(TurnDetectionConfig(sample_rate_hz=sample_rate_hz))
+        self._last_chunk_end_time = 0.0
         self._last_sequence: Optional[int] = None
         self._previous_text = ""
         # Bytes fed into the buffer since the last completed window (or
@@ -92,13 +103,36 @@ class TranscriptionSession:
 
     async def handle_chunk(self, sequence: int, started_at: float, duration: float, pcm: bytes) -> None:
         """Validates and buffers one chunk. Returns as soon as the chunk is
-        buffered — does not wait for any resulting window to transcribe."""
+        buffered — does not wait for any resulting window to transcribe.
+        Also runs local VAD on this chunk (independent of and typically
+        much faster than window-based transcription) to detect turn
+        boundaries in near-real-time."""
         self._validate_sequence(sequence)
         self._bytes_since_last_window += len(pcm)
+        self._last_chunk_end_time = started_at + duration
+        await self._process_turn_signal(self._vad.process_chunk(pcm, duration))
+
         window = self._buffer.add_chunk(pcm)
         if window is not None:
             self._bytes_since_last_window = 0
             await self._window_queue.put((window, started_at, duration))
+
+    async def _process_turn_signal(self, signal: TurnSignal) -> None:
+        if signal == TurnSignal.NONE:
+            return
+        try:
+            if signal == TurnSignal.SPEECH_STARTED:
+                await self._emit_event("turn.state", events.turn_state(session_id=self.session_id, state="speech"))
+            elif signal == TurnSignal.SILENCE_CANDIDATE:
+                await self._emit_event("turn.state", events.turn_state(session_id=self.session_id, state="waiting_for_silence"))
+            elif signal == TurnSignal.TURN_FINALIZED:
+                await self._emit_event("turn.state", events.turn_state(session_id=self.session_id, state="listening"))
+                if self._on_turn_boundary is not None:
+                    await self._on_turn_boundary(self._last_chunk_end_time)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a turn-detection failure must never break transcription
+            logger.error("Unhandled %s while processing a turn signal", type(exc).__name__)
 
     async def _consume_windows(self) -> None:
         while True:
@@ -156,10 +190,23 @@ class TranscriptionSession:
         content `dedupe_overlap` would strip anyway."""
         remaining = self._buffer.flush()
         if remaining is not None and self._bytes_since_last_window > 0:
-            await self._window_queue.put((remaining, 0.0, 0.0))
+            # Real timestamps, not placeholders: `_process_turn_signal`'s
+            # `force_finalize` boundary (below) is compared against the
+            # `ended_at` of whatever fragment this flush produces, so it
+            # must land on the same audio timeline as `_last_chunk_end_time`.
+            flush_duration = self._bytes_since_last_window / (self._buffer.sample_rate_hz * 2)
+            flush_started_at = max(0.0, self._last_chunk_end_time - flush_duration)
+            await self._window_queue.put((remaining, flush_started_at, flush_duration))
         await self._window_queue.join()
         self._consumer_task.cancel()
         try:
             await self._consumer_task
         except asyncio.CancelledError:
             pass
+
+        # Flushes any turn VAD had still open (speech observed, no
+        # silence endpoint reached yet) so trailing speech at session end
+        # isn't silently dropped from turn assembly.
+        finalize_signal = self._vad.force_finalize()
+        if finalize_signal is not None:
+            await self._process_turn_signal(finalize_signal)

@@ -94,6 +94,29 @@ def worker_ready(protocol_version: int, worker_version: str) -> dict:
     return {"protocol_version": protocol_version, "worker_version": worker_version}
 
 
+# MARK: - Turn detection (Section 14)
+
+
+def turn_state(session_id: str, state: str) -> dict:
+    """`state` is one of "listening"/"speech"/"waiting_for_silence" — the
+    raw VAD-derived signal, never transcript/prompt content."""
+    return {"session_id": session_id, "state": state}
+
+
+def question_classifying(session_id: str) -> dict:
+    """Emitted only when a finalized turn is ambiguous enough to need the
+    (slower) semantic classification stage — lets Swift show "Understanding
+    question" instead of nothing happening for that stretch."""
+    return {"session_id": session_id}
+
+
+def question_rejected(session_id: str) -> dict:
+    """Emitted when a finalized turn was classified as not an
+    answer-request — lets Swift return to "Listening" instead of being
+    stuck on "Understanding question" with no further signal."""
+    return {"session_id": session_id}
+
+
 # MARK: - Knowledge ingestion events (Section 9)
 
 

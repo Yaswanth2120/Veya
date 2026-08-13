@@ -58,7 +58,23 @@ final class OverlayWindowController: NSWindowController {
 
         panel.setFrameAutosaveName(Self.frameAutosaveName)
         if !panel.setFrameUsingName(Self.frameAutosaveName) {
-            panel.center()
+            // A first launch with no saved position must not default to
+            // screen-center — that's exactly where the main window (and
+            // its in-app answer panel) sits, so a centered overlay would
+            // cover it in normal (non-screen-share) app mode. Anchoring
+            // to a corner instead keeps the overlay non-obstructive by
+            // default; the user can still drag it anywhere afterward,
+            // and that position is what gets saved/restored from then on.
+            if let visibleFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
+                let margin: CGFloat = 24
+                let origin = NSPoint(
+                    x: visibleFrame.maxX - initialSize.width - margin,
+                    y: visibleFrame.minY + margin
+                )
+                panel.setFrameOrigin(origin)
+            } else {
+                panel.center()
+            }
         }
 
         let rootView = OverlayView(conversationState: conversationState, privacyManager: privacyManager, controller: self)

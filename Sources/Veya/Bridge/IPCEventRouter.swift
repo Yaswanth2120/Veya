@@ -98,6 +98,20 @@ final class IPCEventRouter {
             guard let data: TranscriptPartialEventData = decode(event, matching: \.sessionId) else { return }
             state.setPartialTranscript(data.text)
 
+        case "turn.state":
+            guard let data: TurnStateEventData = decode(event, matching: \.sessionId),
+                  let turnState = ConversationState.TurnState(rawValue: data.state)
+            else { return }
+            state.setTurnState(turnState)
+
+        case "question.classifying":
+            guard let _: QuestionClassifyingEventData = decode(event, matching: \.sessionId) else { return }
+            state.setClassifyingQuestion(true)
+
+        case "question.rejected":
+            guard let _: QuestionRejectedEventData = decode(event, matching: \.sessionId) else { return }
+            state.setClassifyingQuestion(false)
+
         case "transcript.final":
             guard let data: TranscriptFinalEventData = decode(event, matching: \.sessionId),
                   let sessionUUID = UUID(uuidString: data.sessionId)

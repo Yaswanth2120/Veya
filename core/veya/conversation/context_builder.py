@@ -27,7 +27,13 @@ _CODING_INSTRUCTIONS = """This is a coding-practice session. Give a correct, inc
 _SYSTEM_DESIGN_INSTRUCTIONS = """This is a system-design session. State assumptions, requirements, components, data flow, failure modes, scaling, security, observability, and trade-offs. Keep the answer implementable and explicit about uncertainty."""
 
 
-def render_prompt(session_context: SessionContext, question_text: str, document_context_block: str = "", memory_context_block: str = "") -> str:
+def render_prompt(
+    session_context: SessionContext,
+    question_text: str,
+    document_context_block: str = "",
+    memory_context_block: str = "",
+    recent_conversation_block: str = "",
+) -> str:
     """Assembles a minimal structured prompt from the session's own
     fields (nothing external — see build prompt non-goals) plus the
     detected question, and — when retrieval found relevant document
@@ -64,6 +70,14 @@ def render_prompt(session_context: SessionContext, question_text: str, document_
     if memory_context_block:
         memory_block = f"Remembered about this user (from previously approved memory, may not all be relevant):\n{memory_context_block}\n\n"
 
+    # A spoken question is frequently split across Whisper windows. Include
+    # only the small, immediately preceding local transcript context so the
+    # answer model can resolve pronouns and the rest of the interviewer's
+    # request without turning every answer into a summary of the session.
+    conversation_block = ""
+    if recent_conversation_block:
+        conversation_block = f"Recent live conversation (use only when relevant):\n{recent_conversation_block}\n\n"
+
     document_block = ""
     grounded_instructions = ""
     if document_context_block:
@@ -79,6 +93,7 @@ def render_prompt(session_context: SessionContext, question_text: str, document_
     return (
         f"{session_block}"
         f"{memory_block}"
+        f"{conversation_block}"
         f"{style_line}"
         f"A question was just asked in this live conversation:\n"
         f"\"{question_text}\"\n\n"

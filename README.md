@@ -21,6 +21,14 @@ Swift/SwiftUI (AppKit-hosted) owns the UI, all session/transcript/question/answe
 ### Document ingestion & grounded answers (Section 9)
 - `.txt/.md/.pdf/.docx` ingestion, chunking, local embeddings (Ollama), and a pure-Python cosine-similarity SQLite vector store — grounded answers cite real retrieved chunks, never fabricated sources (`docs/KNOWLEDGE_RETRIEVAL.md`).
 
+### Real-time turn detection & low-latency answering (Section 14)
+Replaces the old "judge every ~4s Whisper window independently" question detection, which failed on any question spoken across more than one window and couldn't recognize statement-form prompts like "Tell me about yourself."
+- **Local VAD** (`core/veya/transcription/turn_detection.py`): a chunk-level, energy-based (RMS amplitude) speech/silence state machine — `speech_started`/`speech_continuing`/`silence_candidate`/`turn_finalized` — running independently of and faster than Whisper's window cadence. Configurable silence duration (default 1.2s — long enough that a normal mid-sentence pause doesn't end a turn), a minimum speech duration before silence can finalize anything, and a max-turn-duration safety cap. A trailing open turn is force-finalized at session close so nothing spoken right at the end is dropped.
+- **`TurnAssembler`** (`core/veya/conversation/turn_assembler.py`): coalesces `transcript.final` fragments spanning multiple Whisper windows into one complete spoken turn, deduplicating window overlap the same way transcription already does, and only finalizes on a real endpoint (a VAD boundary, explicit session stop, or the max-duration cap) — never on an individual fragment.
+- **Two-stage semantic classification** (`core/veya/conversation/semantic_classifier.py`): a fast deterministic gate (extended to recognize statement-form prompts — "Tell me about yourself," "Walk me through your resume," "Q1, explain...") decides clear cases immediately; only genuinely ambiguous turns make a local Ollama call for structured JSON classification (`is_answer_request`/`confidence`/`normalized_question`/`reason_category`), safely parsed and validated, falling back to the deterministic gate's own verdict if Ollama is unavailable, slow, or returns malformed output — never crashes transcription.
+- Swift gets three new events (`turn.state`, `question.classifying`, `question.rejected`) driving a real six-state Live Session indicator — Listening / Transcribing / Waiting for speaker to finish / Understanding question / Generating answer / Local AI unavailable — plus a prominent answer panel (previously never rendered at all) with partial vs. finalized transcript shown separately, and a Check Local AI action. The floating overlay now defaults to a screen corner instead of dead-center on first launch, so it doesn't cover the main answer panel.
+- Measured (not claimed) on this development machine with `qwen3:1.7b`: turn-endpoint → `question.detected` ≈0.2ms (deterministic-gate path), `question.detected` → first `answer.delta` ≈2.0s (real local Ollama generation). Environment/hardware-specific; not a benchmark claim.
+
 ### Coding Copilot (Section 11)
 - Python owns versioned coding-workspace state (`core/veya/coding/workspace.py`): every file has a version and a bounded follow-up history that survives edits/applies.
 - RPCs: `coding.list_files`, `coding.upsert_file`, `coding.apply_edits`, `coding.followup`, `coding.debug`, `coding.generate_tests`, `coding.explain`, `coding.analyze`, `coding.run`.
@@ -95,6 +103,6 @@ open .build/package/Veya.app     # or right-click > Open — it's unsigned
 
 ## Testing
 
-- **Python**: 279 tests (`python3 -m unittest discover -s core/tests -t core`), 2 skipped by default (they require a real local Ollama).
-- **Swift**: 162 tests across 23 suites (`./run-tests.sh`), including a real-subprocess integration suite that launches the actual `core/veya` worker (no mocks) to verify IPC, coding/design/report/memory RPCs, crash-restart recovery, session deletion cascade, Local AI status, and knowledge ingestion end-to-end.
+- **Python**: 321 tests (`python3 -m unittest discover -s core/tests -t core`), 3 skipped by default (they require a real local Ollama).
+- **Swift**: 167 tests across 23 suites (`./run-tests.sh`), including a real-subprocess integration suite that launches the actual `core/veya` worker (no mocks) to verify IPC, coding/design/report/memory RPCs, crash-restart recovery, session deletion cascade, Local AI status, turn-state routing, and knowledge ingestion end-to-end.
 - Several suites opportunistically exercise real local Whisper/Ollama when `VEYA_WHISPER_BIN`/`VEYA_WHISPER_MODEL`/`VEYA_OLLAMA_URL`/`VEYA_OLLAMA_MODEL` are set, and are skipped otherwise — they never run against a mock standing in for a real local model.

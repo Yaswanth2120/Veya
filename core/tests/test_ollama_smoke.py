@@ -17,6 +17,7 @@ docs/QUESTION_AND_ANSWER_INTELLIGENCE.md.
 from __future__ import annotations
 
 import os
+import time
 import unittest
 
 from veya.conversation.models import SessionContext
@@ -45,6 +46,7 @@ class OllamaSmokeTest(unittest.IsolatedAsyncioTestCase):
         )
         try:
             await orchestrator.handle_final_transcript("So why did the migration take six weeks?", 0.0, 4.0)
+            await orchestrator.handle_turn_boundary(4.0)  # real silence endpoint finalizing the turn
             task = orchestrator._active_answer_task
             if task is not None:
                 await task
@@ -59,3 +61,47 @@ class OllamaSmokeTest(unittest.IsolatedAsyncioTestCase):
         completed = events[-1][1]
         self.assertTrue(completed["talking_points"] or completed["caveat"])
         self.assertEqual(completed["sources"], [])
+
+    async def test_measured_latency_turn_endpoint_to_first_answer_delta(self):
+        """Prints (does not assert — this is environment/hardware-specific,
+        never a benchmark claim) real measured latency against a real
+        local Ollama instance: finalized-turn -> question.detected, and
+        question.detected -> the first streamed answer.delta."""
+        provider = OllamaProvider()
+        await provider.check_availability()
+
+        timestamps: dict[str, float] = {}
+        events: list[tuple[str, dict]] = []
+
+        async def emit_event(name: str, data: dict) -> None:
+            events.append((name, data))
+            if name == "question.detected" and "question.detected" not in timestamps:
+                timestamps["question.detected"] = time.monotonic()
+            if name == "answer.delta" and "first_answer_delta" not in timestamps:
+                timestamps["first_answer_delta"] = time.monotonic()
+
+        orchestrator = ConversationOrchestrator(
+            session_id="latency-smoke-test",
+            session_context=SessionContext(title="Latency Smoke Test", preferred_answer_style="concise"),
+            emit_event=emit_event,
+            llm_provider=provider,
+        )
+        try:
+            turn_endpoint_time = time.monotonic()
+            await orchestrator.handle_final_transcript("Why did the migration take six weeks?", 0.0, 4.0)
+            await orchestrator.handle_turn_boundary(4.0)
+            task = orchestrator._active_answer_task
+            if task is not None:
+                await task
+        finally:
+            await orchestrator.close()
+
+        names = [name for name, _ in events]
+        self.assertIn("question.detected", names)
+
+        if "question.detected" in timestamps:
+            turn_to_detected_ms = (timestamps["question.detected"] - turn_endpoint_time) * 1000
+            print(f"\n[latency, this environment only] turn endpoint -> question.detected: {turn_to_detected_ms:.1f}ms")
+        if "first_answer_delta" in timestamps and "question.detected" in timestamps:
+            detected_to_delta_ms = (timestamps["first_answer_delta"] - timestamps["question.detected"]) * 1000
+            print(f"[latency, this environment only] question.detected -> first answer.delta: {detected_to_delta_ms:.1f}ms")

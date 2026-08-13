@@ -218,6 +218,68 @@ struct IPCEventRouterTests {
         #expect(state.currentAnswer?.talkingPoints == ["a", "Caveat: assumes default config"])
     }
 
+    @Test("turn.state routes to the matching ConversationState.TurnState")
+    func turnStateRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(try makeEvent("turn.state", #"{"session_id":"\#(sessionID.uuidString)","state":"speech"}"#))
+        #expect(state.turnState == .speech)
+
+        await router.route(try makeEvent("turn.state", #"{"session_id":"\#(sessionID.uuidString)","state":"waiting_for_silence"}"#))
+        #expect(state.turnState == .waitingForSilence)
+
+        await router.route(try makeEvent("turn.state", #"{"session_id":"\#(sessionID.uuidString)","state":"listening"}"#))
+        #expect(state.turnState == .listening)
+    }
+
+    @Test("question.classifying sets isClassifyingQuestion, cleared by question.detected")
+    func questionClassifyingThenDetected() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(try makeEvent("question.classifying", #"{"session_id":"\#(sessionID.uuidString)"}"#))
+        #expect(state.isClassifyingQuestion == true)
+
+        await router.route(
+            try makeEvent(
+                "question.detected",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"\#(UUID().uuidString)","text":"why?","confidence":0.9,"detected_at":0.0}"#
+            )
+        )
+        #expect(state.isClassifyingQuestion == false)
+    }
+
+    @Test("question.classifying cleared by question.rejected when the turn isn't an answer request")
+    func questionClassifyingThenRejected() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(try makeEvent("question.classifying", #"{"session_id":"\#(sessionID.uuidString)"}"#))
+        #expect(state.isClassifyingQuestion == true)
+
+        await router.route(try makeEvent("question.rejected", #"{"session_id":"\#(sessionID.uuidString)"}"#))
+        #expect(state.isClassifyingQuestion == false)
+    }
+
+    @Test("turn-state events for a different session id than the attached one are dropped")
+    func turnStateMismatchedSessionIsDropped() async throws {
+        let attachedSessionID = UUID()
+        let otherSessionID = UUID()
+        let (state, _) = await makeState(sessionID: attachedSessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: attachedSessionID)
+
+        await router.route(try makeEvent("turn.state", #"{"session_id":"\#(otherSessionID.uuidString)","state":"speech"}"#))
+        #expect(state.turnState == .listening)
+    }
+
     @Test("events for a different session id than the attached one are dropped")
     func mismatchedSessionIsDropped() async throws {
         let attachedSessionID = UUID()
