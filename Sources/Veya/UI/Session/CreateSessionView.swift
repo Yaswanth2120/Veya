@@ -204,11 +204,16 @@ struct CreateSessionView: View {
             .padding(12)
             .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
 
-            if isInterviewContextReady {
-                Text(readinessSummaryText)
+            switch readinessState {
+            case .ready(let hasReadyResume):
+                Text(hasReadyResume ? "Resume ready for interview. Interview context ready." : "Interview context ready.")
                     .font(.callout)
                     .foregroundStyle(.green)
-            } else {
+            case .blocked:
+                Text("One or more documents failed to index or aren't supported. They will not become ready — start anyway, or remove and re-attach them.")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            case .indexing:
                 HStack {
                     ProgressView().controlSize(.small)
                     Text("Indexing documents…").font(.callout)
@@ -222,7 +227,7 @@ struct CreateSessionView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!isInterviewContextReady)
 
-                if !isInterviewContextReady {
+                if readinessState == .blocked {
                     Button("Start anyway") {
                         coordinator.requestStartLiveSession(for: session)
                     }
@@ -232,16 +237,20 @@ struct CreateSessionView: View {
         }
     }
 
+    /// Only documents that have actually finished indexing successfully
+    /// count as "ready" — `.failed`/`.unsupported` must never silently
+    /// unlock the normal Start button. The only way past those states is
+    /// the explicit "Start anyway" escape hatch above.
     private var isInterviewContextReady: Bool {
-        viewModel.lastCreatedDocuments.allSatisfy { document in
-            let status = knowledgeIngestionTracker.status(forDocumentID: document.id)
-            return status == .ready || status == .failed || status == .unsupported
-        }
+        if case .ready = readinessState { return true }
+        return false
     }
 
-    private var readinessSummaryText: String {
-        let hasResume = viewModel.lastCreatedDocuments.contains { $0.documentKind == DocumentKind.resume.rawValue }
-        return hasResume ? "Resume ready for interview. Interview context ready." : "Interview context ready."
+    private var readinessState: InterviewReadinessState {
+        InterviewReadinessEvaluator.evaluate(
+            documents: viewModel.lastCreatedDocuments,
+            status: { knowledgeIngestionTracker.status(forDocumentID: $0) }
+        )
     }
 
     private var isInterviewSession: Bool {
