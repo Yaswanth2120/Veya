@@ -3,6 +3,16 @@ import SwiftUI
 struct LiveSessionView: View {
     @EnvironmentObject private var coordinator: AppCoordinator
     @ObservedObject var conversationState: ConversationState
+    @ObservedObject private var pythonIntelligenceCoordinator: PythonIntelligenceCoordinator
+    @ObservedObject private var knowledgeIngestionTracker: KnowledgeIngestionTracker
+    @State private var sessionDocuments: [SessionDocument] = []
+    private let documentRepository = SessionDocumentRepository()
+
+    init(conversationState: ConversationState, pythonIntelligenceCoordinator: PythonIntelligenceCoordinator) {
+        self.conversationState = conversationState
+        self.pythonIntelligenceCoordinator = pythonIntelligenceCoordinator
+        self.knowledgeIngestionTracker = pythonIntelligenceCoordinator.knowledgeIngestionTracker
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -12,8 +22,15 @@ struct LiveSessionView: View {
                 transcriptPanel
                 sidePanel
             }
+            if let session = coordinator.currentSession,
+               session.sessionType == .codingPractice || session.sessionType == .systemDesign {
+                CopilotWorkbenchView(session: session)
+            }
         }
         .padding(28)
+        .task {
+            sessionDocuments = (try? await documentRepository.fetchAll(sessionID: conversationState.sessionID)) ?? []
+        }
     }
 
     private var header: some View {
@@ -24,6 +41,9 @@ struct LiveSessionView: View {
                 Text(statusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text(intelligenceSourceText)
+                    .font(.caption2)
+                    .foregroundStyle(intelligenceSourceIsFallback ? .orange : .secondary)
             }
             Spacer()
             Button("End Session") {
@@ -39,6 +59,27 @@ struct LiveSessionView: View {
         case .idle: return "Not started"
         case .live: return "Mocked transcript is streaming…"
         case .ended: return "Session ended"
+        }
+    }
+
+    /// Never claims Python-backed mock intelligence or real transcription
+    /// is active when it isn't — see build prompt "Fallback Behavior."
+    /// The text itself is decided by the coordinator (not here) so
+    /// AVFoundation/worker-state details stay out of this view.
+    private var intelligenceSourceText: String {
+        pythonIntelligenceCoordinator.liveSessionIndicatorText
+    }
+
+    private var intelligenceSourceIsFallback: Bool {
+        switch pythonIntelligenceCoordinator.drivingSource {
+        case .swiftFallback, .pythonWorker:
+            return true
+        case .realTranscription:
+            // Real transcripts are still flowing — only flag it visually
+            // when answer intelligence specifically isn't available.
+            return !pythonIntelligenceCoordinator.answerIntelligenceAvailable
+        case .none:
+            return false
         }
     }
 
@@ -81,6 +122,10 @@ struct LiveSessionView: View {
                 }
             }
 
+            if !sessionDocuments.isEmpty {
+                documentsSection
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 Text("OVERLAY")
                     .font(.caption.bold())
@@ -99,5 +144,28 @@ struct LiveSessionView: View {
         .frame(width: 260, alignment: .topLeading)
         .padding(12)
         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Section 9's exact status list (Not indexed/Indexing…/Ready/Failed
+    /// to index/Unsupported document) — never claims a document is
+    /// searchable ("Ready") until Python's `knowledge.ingestion_completed`
+    /// actually says so.
+    private var documentsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("DOCUMENTS")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+            ForEach(sessionDocuments) { document in
+                HStack {
+                    Text(document.fileName)
+                        .font(.caption)
+                        .lineLimit(1)
+                    Spacer()
+                    Text(knowledgeIngestionTracker.status(forDocumentID: document.id).displayText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }

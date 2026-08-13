@@ -1,0 +1,8 @@
+{
+  "id": "for-tests-ggml-base.en",
+  "url": "file:///Users/yaswanth/Desktop/Veya/whisper.cpp/models/for-tests-ggml-base.en.bin",
+  "sha256": "1bc042ca584ff1895897e95bffb34ccf357be46c1fca97cf7fbe32f2060aa9e8",
+  "architecture": "universal",
+  "sizeBytes": 586836,
+  "version": "test-fixture-1"
+}

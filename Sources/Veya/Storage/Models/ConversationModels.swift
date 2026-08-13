@@ -48,3 +48,23 @@ struct CopilotAnswer: Identifiable, Codable, Equatable, FetchableRecord, Persist
 
     static let databaseTableName = "generatedAnswer"
 }
+
+/// A durable, Python-analyzed summary of one ended session (Section 13).
+/// Python computes the analysis (`session.analyze`, given narrowly scoped
+/// transcript/question/answer data); Swift/GRDB remains the sole
+/// persistence authority — this is where the result actually lives across
+/// app restarts, same as every other session-scoped record.
+struct SessionReport: Identifiable, Codable, Equatable, FetchableRecord, PersistableRecord {
+    let id: UUID
+    let sessionID: UUID
+    let summary: String
+    let topics: [String]
+    let questions: [String]
+    let decisions: [String]
+    let actionItems: [String]
+    let unansweredQuestions: [String]
+    let preparationGaps: [String]
+    let generatedAt: Date
+
+    static let databaseTableName = "sessionReport"
+}

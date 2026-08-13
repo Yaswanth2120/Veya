@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @EnvironmentObject private var coordinator: AppCoordinator
     @StateObject private var viewModel = SettingsViewModel()
 
     var body: some View {
@@ -17,6 +18,18 @@ struct SettingsView: View {
                     }
                     Toggle("Always on top", isOn: $viewModel.alwaysOnTop)
                     Toggle("Compact mode", isOn: $viewModel.compactMode)
+                }
+
+                Section("Privacy") {
+                    Button("Presenter Privacy…") {
+                        coordinator.route = .presenterPrivacy
+                    }
+                }
+
+                Section("Memory") {
+                    Button("Review Remembered Facts…") {
+                        coordinator.route = .memory
+                    }
                 }
             }
             .formStyle(.grouped)

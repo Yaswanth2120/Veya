@@ -75,7 +75,10 @@ struct CreateSessionView: View {
                 Button("Create & Start Session") {
                     Task {
                         if let session = await viewModel.save() {
-                            coordinator.startLiveSession(for: session)
+                            coordinator.pythonIntelligenceCoordinator.ingestDocuments(
+                                session: session, documents: viewModel.lastCreatedDocuments
+                            )
+                            coordinator.requestStartLiveSession(for: session)
                         }
                     }
                 }

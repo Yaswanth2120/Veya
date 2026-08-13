@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Veya</string>
+	<key>CFBundleDisplayName</key>
+	<string>Veya</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.veya.app</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>Veya</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Veya listens to the current conversation to transcribe it locally and suggest answers to detected questions. Audio is processed on this Mac and is never uploaded.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Veya's Safe Share mode captures the screen locally to render a presenter-only overlay that is excluded from what you share.</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+</dict>
+</plist>

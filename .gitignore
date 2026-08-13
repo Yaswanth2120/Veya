@@ -3,3 +3,17 @@
 *.xcodeproj
 .DS_Store
 whisper.cpp/
+__pycache__/
+*.pyc
+*.pyo
+core/*.egg-info/
+.venv/
+venv/
+core/.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.sqlite
+*.sqlite3
+KnowledgeIndex/
+SessionDocuments/

@@ -24,6 +24,12 @@ final class CreateSessionViewModel: ObservableObject {
     @Published var isFileImporterPresented = false
     @Published var errorMessage: String?
 
+    /// The `SessionDocument` rows actually persisted by the most recent
+    /// `save()` call — the caller (`CreateSessionView`) uses these to
+    /// request ingestion via `PythonIntelligenceCoordinator.ingestDocuments`
+    /// once the session itself has been created successfully.
+    private(set) var lastCreatedDocuments: [SessionDocument] = []
+
     private let sessionRepository = SessionRepository()
     private let documentRepository = SessionDocumentRepository()
 
@@ -88,6 +94,7 @@ final class CreateSessionViewModel: ObservableObject {
     }
 
     private func persistDocuments(for session: Session) async throws {
+        lastCreatedDocuments = []
         guard !attachedDocuments.isEmpty else { return }
 
         let appSupport = try FileManager.default.url(
@@ -123,6 +130,7 @@ final class CreateSessionViewModel: ObservableObject {
                 addedAt: Date()
             )
             try await documentRepository.create(document)
+            lastCreatedDocuments.append(document)
         }
     }
 }

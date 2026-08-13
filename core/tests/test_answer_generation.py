@@ -1,0 +1,133 @@
+import asyncio
+import unittest
+
+from veya.conversation.answer_generation import generate_answer, parse_answer_text
+from veya.llm.errors import LLMProviderError, LLMTimeoutError
+
+
+class ParseAnswerTextTests(unittest.TestCase):
+    def test_well_formed_response_is_parsed_into_all_three_parts(self):
+        raw = (
+            "ANSWER: The migration took six weeks due to staged rollout.\n"
+            "POINTS:\n"
+            "- Auth service migrated first\n"
+            "- Staged rollout for backward compatibility\n"
+            "- Validation added time but reduced risk\n"
+            "CAVEAT: Exact timeline may vary by team.\n"
+        )
+        parsed = parse_answer_text(raw)
+        self.assertEqual(parsed.short_answer, "The migration took six weeks due to staged rollout.")
+        self.assertEqual(
+            parsed.talking_points,
+            [
+                "Auth service migrated first",
+                "Staged rollout for backward compatibility",
+                "Validation added time but reduced risk",
+            ],
+        )
+        self.assertEqual(parsed.caveat, "Exact timeline may vary by team.")
+
+    def test_caveat_of_none_is_treated_as_no_caveat(self):
+        raw = "ANSWER: Yes.\nPOINTS:\n- One point\nCAVEAT: none\n"
+        parsed = parse_answer_text(raw)
+        self.assertEqual(parsed.caveat, "")
+
+    def test_talking_points_are_capped_at_five(self):
+        raw = "ANSWER: Many reasons.\nPOINTS:\n" + "\n".join(f"- point {i}" for i in range(10))
+        parsed = parse_answer_text(raw)
+        self.assertEqual(len(parsed.talking_points), 5)
+
+    def test_never_fabricates_sources_field(self):
+        # parse_answer_text has no notion of "sources" at all — the
+        # orchestrator always emits sources=[] regardless of what the
+        # model said, so there is nothing to parse here that could leak
+        # into a sources list.
+        raw = "ANSWER: See the official docs at example.com.\nPOINTS:\n- a point\n"
+        parsed = parse_answer_text(raw)
+        self.assertFalse(hasattr(parsed, "sources"))
+
+    def test_malformed_response_falls_back_to_sentence_splitting(self):
+        raw = "This is just a plain sentence. Here is another one. And a third."
+        parsed = parse_answer_text(raw)
+        self.assertEqual(parsed.short_answer, "This is just a plain sentence.")
+        self.assertEqual(len(parsed.talking_points), 3)
+        self.assertEqual(parsed.caveat, "")
+
+    def test_empty_response_produces_an_empty_parsed_answer(self):
+        parsed = parse_answer_text("")
+        self.assertEqual(parsed.short_answer, "")
+        self.assertEqual(parsed.talking_points, [])
+
+
+class FakeProvider:
+    def __init__(self, deltas, error=None):
+        self._deltas = deltas
+        self._error = error
+        self.availability_checked = False
+
+    async def check_availability(self):
+        self.availability_checked = True
+
+    async def generate_stream(self, prompt, *, timeout):
+        for delta in self._deltas:
+            await asyncio.sleep(0)
+            yield delta
+        if self._error is not None:
+            raise self._error
+
+
+class GenerateAnswerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deltas_are_delivered_in_order_and_accumulated_for_parsing(self):
+        provider = FakeProvider(["ANSWER: Hi", ".\nPOINTS:\n", "- a point\n"])
+        received = []
+
+        async def on_delta(delta):
+            received.append(delta)
+
+        parsed = await generate_answer(provider, "prompt", on_delta=on_delta)
+
+        self.assertEqual(received, ["ANSWER: Hi", ".\nPOINTS:\n", "- a point\n"])
+        self.assertEqual(parsed.short_answer, "Hi.")
+        self.assertEqual(parsed.talking_points, ["a point"])
+
+    async def test_provider_error_propagates_to_the_caller(self):
+        provider = FakeProvider(["partial"], error=LLMProviderError("boom"))
+
+        async def on_delta(delta):
+            pass
+
+        with self.assertRaises(LLMProviderError):
+            await generate_answer(provider, "prompt", on_delta=on_delta)
+
+    async def test_provider_timeout_propagates_to_the_caller(self):
+        provider = FakeProvider([], error=LLMTimeoutError("timed out"))
+
+        async def on_delta(delta):
+            pass
+
+        with self.assertRaises(LLMTimeoutError):
+            await generate_answer(provider, "prompt", on_delta=on_delta)
+
+    async def test_cancellation_stops_delivering_deltas(self):
+        received = []
+
+        class SlowProvider:
+            async def generate_stream(self, prompt, *, timeout):
+                for i in range(1000):
+                    await asyncio.sleep(0.01)
+                    yield f"chunk-{i}"
+
+        async def on_delta(delta):
+            received.append(delta)
+
+        task = asyncio.create_task(generate_answer(SlowProvider(), "prompt", on_delta=on_delta))
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        # A handful of chunks may have been delivered before cancellation
+        # landed, but nowhere near all 1000 — proves cancellation actually
+        # stopped the stream rather than running to completion.
+        self.assertLess(len(received), 1000)

@@ -47,6 +47,10 @@ private struct SessionDetailDisclosure: View {
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             VStack(alignment: .leading, spacing: 8) {
+                if let report = detail.report {
+                    SessionReportSummaryView(report: report)
+                    Divider()
+                }
                 if detail.transcript.isEmpty {
                     Text("No transcript recorded.")
                         .font(.caption)
@@ -71,13 +75,39 @@ private struct SessionDetailDisclosure: View {
     }
 }
 
+private struct SessionReportSummaryView: View {
+    let report: SessionReport
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("SESSION REPORT").font(.caption.bold())
+            if !report.summary.isEmpty { Text(report.summary).font(.caption) }
+            labeledList("Topics", report.topics)
+            labeledList("Decisions", report.decisions)
+            labeledList("Action Items", report.actionItems)
+            labeledList("Unanswered Questions", report.unansweredQuestions)
+            labeledList("Preparation Gaps", report.preparationGaps)
+        }
+    }
+
+    @ViewBuilder
+    private func labeledList(_ title: String, _ items: [String]) -> some View {
+        if !items.isEmpty {
+            Text(title).font(.caption2.bold()).foregroundStyle(.secondary)
+            ForEach(items, id: \.self) { Text("• \($0)").font(.caption2) }
+        }
+    }
+}
+
 @MainActor
 private final class SessionDetailViewModel: ObservableObject {
     @Published private(set) var transcript: [TranscriptSegment] = []
+    @Published private(set) var report: SessionReport?
     private let repository = ConversationRepository()
 
     func load(sessionID: UUID) async {
         transcript = (try? await repository.transcript(sessionID: sessionID)) ?? []
+        report = try? await repository.report(sessionID: sessionID)
     }
 }
 

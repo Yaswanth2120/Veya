@@ -5,10 +5,11 @@ import SwiftUI
 /// at `.floating` level, hosting the SwiftUI `OverlayView`. Handles
 /// show/hide, compact/expanded resizing, opacity, and frame persistence.
 ///
-/// Nothing here touches capture exclusion, window sharing type, or any
-/// other presenter-privacy behavior — that's a separate subsystem being
-/// built outside this prompt. Only documented, standard `NSPanel`/
-/// `NSWindow` APIs are used.
+/// This controller only handles window presentation — it does not set
+/// `sharingType` or any other capture-exclusion behavior itself.
+/// `PresenterPrivacyManager` reaches in via `managedWindow` to configure
+/// that separately (see docs/PRESENTER_PRIVACY.md), keeping this class
+/// focused on the same job it had before that subsystem existed.
 @MainActor
 final class OverlayWindowController: NSWindowController {
     private let preferencesStore: OverlayPreferencesStore
@@ -20,6 +21,7 @@ final class OverlayWindowController: NSWindowController {
 
     init(
         conversationState: ConversationState,
+        privacyManager: PresenterPrivacyManager,
         preferencesStore: OverlayPreferencesStore = OverlayPreferencesStore()
     ) {
         self.preferencesStore = preferencesStore
@@ -46,9 +48,11 @@ final class OverlayWindowController: NSWindowController {
         panel.alphaValue = loadedPreferences.opacity
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        // TODO: presenter-privacy — out of scope, see project owner.
-        // (Capture-exclusion / screen-share visibility behavior belongs to
-        // a separate subsystem, not to standard window-level setup here.)
+        // Capture-exclusion / screen-share visibility behavior for this
+        // panel is configured by `PresenterPrivacyManager`
+        // (`window.sharingType = .none`, best-effort — see
+        // docs/PRESENTER_PRIVACY.md), not here. This controller only sets
+        // up standard window-level appearance/behavior.
 
         super.init(window: panel)
 
@@ -57,7 +61,7 @@ final class OverlayWindowController: NSWindowController {
             panel.center()
         }
 
-        let rootView = OverlayView(conversationState: conversationState, controller: self)
+        let rootView = OverlayView(conversationState: conversationState, privacyManager: privacyManager, controller: self)
         panel.contentView = NSHostingView(rootView: rootView)
     }
 
@@ -65,6 +69,11 @@ final class OverlayWindowController: NSWindowController {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    /// Exposes the managed panel read-only so other subsystems (Presenter
+    /// Privacy) can act on the Veya-owned overlay window without this
+    /// controller needing to know anything about privacy/capture.
+    var managedWindow: NSWindow? { window }
 
     // MARK: - Visibility
 

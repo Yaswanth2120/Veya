@@ -15,6 +15,7 @@ enum OverlayAnswerStyle: String, CaseIterable, Identifiable {
 /// `ConversationState.currentAnswer` — no intelligence lives here.
 struct OverlayView: View {
     @ObservedObject var conversationState: ConversationState
+    @ObservedObject var privacyManager: PresenterPrivacyManager
     let controller: OverlayWindowController
 
     @State private var style: OverlayAnswerStyle = .short
@@ -32,6 +33,12 @@ struct OverlayView: View {
             Spacer(minLength: 0)
 
             styleRow
+
+            if let privacyIndicatorText {
+                Text(privacyIndicatorText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -97,6 +104,26 @@ struct OverlayView: View {
         Text("Listening for questions…")
             .font(.callout)
             .foregroundStyle(.secondary)
+    }
+
+    /// A minimal, non-intrusive status line — never more than this one
+    /// short string — per the build prompt's "don't clutter the overlay."
+    /// When things are fine it always shows the ✓ confirmation; the ⚠
+    /// warning variants are gated behind `warnWhenUnverified` — a user who
+    /// has turned that off doesn't want to be alarmed by it mid-session.
+    private var privacyIndicatorText: String? {
+        guard privacyManager.preferences.enabled else { return nil }
+        let warnWhenUnverified = privacyManager.preferences.warnWhenUnverified
+        switch privacyManager.preferences.selectedMode {
+        case .normal:
+            return nil
+        case .safeShare:
+            if privacyManager.isSafeShareRunning { return "Privacy: Safe Share ✓" }
+            return warnWhenUnverified ? "Privacy: Safe Share not running ⚠" : nil
+        case .directPrivateOverlay:
+            if privacyManager.status == .verified { return "Privacy: Direct / Verified ✓" }
+            return warnWhenUnverified ? "Privacy: Unverified ⚠" : nil
+        }
     }
 
     private var styleRow: some View {

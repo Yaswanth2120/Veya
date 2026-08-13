@@ -1,0 +1,24 @@
+[project]
+name = "veya-worker"
+version = "0.1.0"
+description = "Veya local Python intelligence worker for transcription, answers, and document retrieval."
+requires-python = ">=3.10"
+dependencies = [
+    # PDF text extraction (core/veya/knowledge/extraction.py). Pure
+    # Python, no compiled/native dependencies. If missing, PDF ingestion
+    # fails with a typed DocumentMalformedError — txt/md/docx are
+    # unaffected — but a real deployment needs it installed for PDF
+    # support to actually work. See docs/KNOWLEDGE_RETRIEVAL.md.
+    "pypdf>=5,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["veya*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

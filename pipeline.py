@@ -1,3 +1,21 @@
+# LEGACY EXPERIMENTATION CODE — NOT INTEGRATED WITH THE APP.
+#
+# This was an early, standalone proof-of-concept (whisper.cpp + a local
+# Ollama model) from before Section 6 introduced the real Swift↔Python
+# bridge. The Veya app does not invoke this file, does not use Ollama,
+# and does not use Whisper.
+#
+# The actual Python worker Swift talks to lives in `core/veya/` and is
+# started by `Sources/Veya/Bridge/PythonWorkerManager.swift` — see
+# `docs/IPC_PROTOCOL.md`. To smoke-test that worker directly, run:
+#
+#   cd core && python3 -m veya
+#
+# and pipe it JSON Lines requests, or see docs/IPC_PROTOCOL.md's
+# troubleshooting section for a scripted example.
+#
+# Kept here only as a labeled historical artifact; requires `requests`,
+# a local Ollama install, and a built whisper.cpp binary to actually run.
 import subprocess
 import requests
 

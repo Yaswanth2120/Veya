@@ -83,4 +83,58 @@ struct ConversationStateTests {
         state.end()
         #expect(state.phase == .ended)
     }
+
+    @Test("ingestDetectedQuestion sets isAnalyzingQuestion, cleared once answer generation starts")
+    func isAnalyzingQuestionLifecycle() async {
+        let sessionID = UUID()
+        let state = makeState(sessionID: sessionID)
+        #expect(state.isAnalyzingQuestion == false)
+
+        let question = DetectedQuestion(id: UUID(), sessionID: sessionID, text: "Why?", detectedAt: Date())
+        await state.ingestDetectedQuestion(question)
+        #expect(state.isAnalyzingQuestion == true)
+        #expect(state.isGeneratingAnswer == false)
+
+        state.setAnswerGenerating(true)
+        #expect(state.isAnalyzingQuestion == false)
+        #expect(state.isGeneratingAnswer == true)
+    }
+
+    @Test("ingestTranscriptSegment (the Python-driven path) never runs the Swift canned question detector")
+    func ingestTranscriptSegmentNeverRunsCannedDetection() async {
+        // This is the entry point both the Python mock feed AND real
+        // transcription route final transcript text through
+        // (`IPCEventRouter`) — unlike `ingest(_:)` (the Swift-fallback-only
+        // entry point), it must never independently decide a segment is a
+        // question, even for text that obviously looks like one.
+        let sessionID = UUID()
+        let state = makeState(sessionID: sessionID)
+
+        await state.ingestTranscriptSegment(
+            makeSegment(sessionID: sessionID, text: "So why did the migration take six weeks?")
+        )
+
+        #expect(state.segments.count == 1)
+        #expect(state.detectedQuestions.isEmpty)
+        #expect(state.currentAnswer == nil)
+    }
+
+    @Test("cancelPendingAnswerActivity clears analyzing/generating/partial state without touching persisted data")
+    func cancelPendingAnswerActivityClearsTransientState() async {
+        let sessionID = UUID()
+        let state = makeState(sessionID: sessionID)
+
+        let question = DetectedQuestion(id: UUID(), sessionID: sessionID, text: "Why?", detectedAt: Date())
+        await state.ingestDetectedQuestion(question)
+        state.setAnswerGenerating(true)
+        state.setPartialAnswer("partial text")
+
+        state.cancelPendingAnswerActivity()
+
+        #expect(state.isAnalyzingQuestion == false)
+        #expect(state.isGeneratingAnswer == false)
+        #expect(state.partialAnswerText == nil)
+        // The already-persisted question itself is untouched.
+        #expect(state.detectedQuestions.count == 1)
+    }
 }

@@ -55,4 +55,19 @@ final class ConversationRepository: Sendable {
                 .fetchAll(db)
         }
     }
+
+    func save(_ report: SessionReport) async throws {
+        try await db.dbWriter.write { db in
+            try report.insert(db)
+        }
+    }
+
+    func report(sessionID: UUID) async throws -> SessionReport? {
+        try await db.dbWriter.read { db in
+            try SessionReport
+                .filter(Column("sessionID") == sessionID)
+                .order(Column("generatedAt").desc)
+                .fetchOne(db)
+        }
+    }
 }

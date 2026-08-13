@@ -129,6 +129,35 @@ final class DatabaseManager: Sendable {
             }
         }
 
+        migrator.registerMigration("v2_createCaptureCompatibilityRecord") { db in
+            try db.create(table: CaptureCompatibilityRecord.databaseTableName) { t in
+                t.column("id", .text).primaryKey()
+                t.column("testedAt", .datetime).notNull()
+                t.column("macOSVersion", .text).notNull()
+                t.column("veyaVersion", .text).notNull()
+                t.column("displayID", .integer).notNull()
+                t.column("mode", .text).notNull()
+                t.column("result", .text).notNull()
+            }
+        }
+
+        migrator.registerMigration("v3_createSessionReport") { db in
+            try db.create(table: SessionReport.databaseTableName) { t in
+                t.column("id", .text).primaryKey()
+                t.column("sessionID", .text).notNull()
+                    .indexed()
+                    .references(Session.databaseTableName, onDelete: .cascade)
+                t.column("summary", .text).notNull()
+                t.column("topics", .text).notNull()
+                t.column("questions", .text).notNull()
+                t.column("decisions", .text).notNull()
+                t.column("actionItems", .text).notNull()
+                t.column("unansweredQuestions", .text).notNull()
+                t.column("preparationGaps", .text).notNull()
+                t.column("generatedAt", .datetime).notNull()
+            }
+        }
+
         try migrator.migrate(dbWriter)
     }
 }
