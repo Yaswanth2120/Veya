@@ -432,6 +432,91 @@ class SessionStopFlushesTrailingTurnIntoARealAnswerTests(unittest.IsolatedAsynci
         self.assertIn("staged rollout", completed["talking_points"])
 
 
+class _ScreenshotPhrasesEngine:
+    """Returns the exact phrases from a real live-session screenshot that
+    a review found went unanswered, one per completed Whisper window, in
+    order."""
+
+    def __init__(self):
+        self._responses = iter([
+            "Tell me about yourself.",
+            "What was the specific bottleneck causing latency in the checkout service",
+        ])
+
+    def transcribe_pcm(self, pcm_s16le: bytes, sample_rate_hz: int) -> str:
+        return next(self._responses, "")
+
+
+class StrongPromptIsAnsweredWithoutAnyVADSilenceOrStopTests(unittest.IsolatedAsyncioTestCase):
+    """Regression test for a review finding: a real Live Session screenshot
+    showed real transcript text ("Tell me about yourself.", "What was the
+    specific bottleneck causing latency...") sitting on screen unanswered.
+    The root cause: a finalized transcript only ever reached question
+    classification once VAD reported a full silence endpoint — under
+    continuous background noise, an interviewer who keeps talking, or an
+    RMS threshold that merges speech, that endpoint can simply never
+    arrive. This drives the real `Dispatcher` through continuous loud
+    audio chunks only — never a quiet chunk, never `transcription.stop`,
+    never any turn-boundary signal at all — reproducing the screenshot
+    exactly, and asserts an answer is still produced via the strong-prompt
+    speculative debounce alone."""
+
+    async def test_a_strong_prompt_is_answered_via_debounce_with_continuous_loud_audio_and_no_stop(self):
+        context, emitter = make_context(engine_factory=_ScreenshotPhrasesEngine, llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        await dispatcher.dispatch(
+            Request(
+                id="2", method="transcription.start",
+                params={"session_id": "s1", "sample_rate_hz": 4000, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+
+        import struct
+
+        window_bytes = 4 * 4000 * 2  # RollingWindowConfig's default window_seconds=4.0
+        loud_sample = struct.pack("<hh", 6000, -6000)
+        loud_pcm = (loud_sample * (window_bytes // 4 + 1))[:window_bytes]
+
+        for sequence, started_at in enumerate([0.0, 4.0]):
+            await dispatcher.dispatch(
+                Request(
+                    id=str(sequence + 3), method="transcription.audio_chunk",
+                    params={
+                        "session_id": "s1", "sequence": sequence, "started_at_seconds": started_at, "duration_seconds": 4.0,
+                        "audio_base64": base64.b64encode(loud_pcm).decode("ascii"),
+                    },
+                ),
+                context,
+            )
+
+        # No silence, no transcription.stop — the deterministic-gate
+        # debounce (see orchestrator.py) is the only thing that can
+        # finalize the turn here, and it fires ~0.7s after the last new
+        # fragment with no further extension. A speculative draft answer
+        # can (and here, does) complete *before* that finalize — the two
+        # are no longer strictly coupled — so waiting on `answer.completed`
+        # alone is not a reliable proxy for "the turn was finalized";
+        # `question.detected` is what that actually requires.
+        self.assertNotIn("question.detected", [name for name, _ in emitter.events])
+
+        import asyncio
+
+        deadline = asyncio.get_event_loop().time() + 3.0
+        while "question.detected" not in [name for name, _ in emitter.events] and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+
+        names = [name for name, _ in emitter.events]
+        self.assertIn("question.detected", names)
+        self.assertIn("answer.completed", names)
+        detected_text = next(data for name, data in emitter.events if name == "question.detected")["text"]
+        self.assertIn("Tell me about yourself", detected_text)
+        self.assertIn("bottleneck causing latency", detected_text)
+
+        await context.close_transcription_session_if_running()
+
+
 class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_session_context_is_captured_from_session_start(self):
         context, _ = make_context()
@@ -484,7 +569,7 @@ class AnswerIntelligenceAvailabilityTests(unittest.IsolatedAsyncioTestCase):
             context,
         )
 
-        self.assertEqual(result, {"ok": True, "answer_intelligence_available": False})
+        self.assertEqual(result, {"ok": True, "answer_intelligence_available": False, "asr_provider": "degraded_batch"})
         await context.close_transcription_session_if_running()
 
     async def test_transcription_start_reports_answer_intelligence_available_when_llm_check_succeeds(self):
@@ -501,7 +586,7 @@ class AnswerIntelligenceAvailabilityTests(unittest.IsolatedAsyncioTestCase):
             context,
         )
 
-        self.assertEqual(result, {"ok": True, "answer_intelligence_available": True})
+        self.assertEqual(result, {"ok": True, "answer_intelligence_available": True, "asr_provider": "degraded_batch"})
         await context.close_transcription_session_if_running()
 
     async def test_transcription_still_succeeds_when_ollama_is_unavailable(self):

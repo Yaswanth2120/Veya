@@ -86,6 +86,14 @@ class TurnAssembler:
     def has_pending_content(self) -> bool:
         return bool(self._fragments)
 
+    def peek_pending_text(self) -> str:
+        """The turn text assembled so far, without finalizing/consuming
+        it — lets a caller judge whether the still-open turn already
+        reads as a complete, strong prompt (e.g. to decide whether to
+        finalize early rather than waiting for a VAD silence endpoint
+        that may never come, e.g. under continuous background noise)."""
+        return " ".join(fragment.text for fragment in self._fragments if fragment.text).strip()
+
     def _finalize(self) -> Optional[str]:
         text = " ".join(fragment.text for fragment in self._fragments if fragment.text).strip()
         self._fragments = []

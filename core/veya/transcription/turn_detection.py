@@ -67,13 +67,35 @@ class VoiceActivityDetector:
         self._silence_seconds = 0.0
         self._turn_elapsed_seconds = 0.0
         self._silence_candidate_reported = False
+        self._last_rms = 0.0
+
+    @property
+    def last_rms(self) -> float:
+        """The RMS amplitude computed for the most recent chunk passed to
+        `process_chunk` — real diagnostic data (not decorative), meant for
+        a developer-facing view so real microphone behavior can be
+        verified against the actual threshold rather than guessed at."""
+        return self._last_rms
 
     @property
     def is_in_speech(self) -> bool:
         return self._in_speech
 
+    @property
+    def speech_rms_threshold(self) -> int:
+        return self._config.speech_rms_threshold
+
+    @property
+    def speech_seconds(self) -> float:
+        return self._speech_seconds
+
+    @property
+    def silence_seconds(self) -> float:
+        return self._silence_seconds
+
     def process_chunk(self, pcm_s16le: bytes, duration_seconds: float) -> TurnSignal:
-        is_loud = self._rms(pcm_s16le) >= self._config.speech_rms_threshold
+        self._last_rms = self._rms(pcm_s16le)
+        is_loud = self._last_rms >= self._config.speech_rms_threshold
 
         if is_loud:
             return self._handle_loud_chunk(duration_seconds)

@@ -312,6 +312,38 @@ class TranscriptionSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("transcript.partial", [name for name, _ in emitter.events])
         await session.close()
 
+    async def test_vad_diagnostics_are_off_by_default(self):
+        engine = FakeEngine([])
+        emitter = RecordingEmitter()
+        session = TranscriptionSession(
+            session_id="s1", sample_rate_hz=100, engine=engine, emit_event=emitter, run_blocking=immediate_run_blocking,
+        )
+        await session.handle_chunk(0, 0.0, 0.2, make_loud_pcm(40))
+        self.assertNotIn("turn.debug", [name for name, _ in emitter.events])
+        await session.close()
+
+    async def test_vad_diagnostics_report_real_rms_and_threshold_when_enabled(self):
+        # A review found the app could go silent with no way for a
+        # developer to see *why* — was VAD even seeing the microphone as
+        # speech? This is the raw data a diagnostics screen needs to
+        # answer that against a real microphone, not just Whisper's
+        # eventual (and possibly never-arriving) text output.
+        engine = FakeEngine([])
+        emitter = RecordingEmitter()
+        session = TranscriptionSession(
+            session_id="s1", sample_rate_hz=100, engine=engine, emit_event=emitter, run_blocking=immediate_run_blocking,
+            emit_vad_diagnostics=True,
+        )
+        await session.handle_chunk(0, 0.0, 0.2, make_loud_pcm(40))
+
+        debug_events = [data for name, data in emitter.events if name == "turn.debug"]
+        self.assertEqual(len(debug_events), 1)
+        data = debug_events[0]
+        self.assertGreater(data["rms"], data["threshold"])  # loud PCM was actually classified as speech
+        self.assertTrue(data["is_in_speech"])
+        self.assertGreater(data["speech_seconds"], 0.0)
+        await session.close()
+
     async def test_engine_exception_does_not_crash_the_session_or_leak_message(self):
         class BoomEngine:
             def transcribe_pcm(self, pcm_s16le, sample_rate_hz):

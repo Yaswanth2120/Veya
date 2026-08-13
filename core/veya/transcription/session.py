@@ -57,6 +57,7 @@ class TranscriptionSession:
         vad: Optional[VoiceActivityDetector] = None,
         partial_window_seconds: float = 2.0,
         partial_interval_seconds: float = 1.0,
+        emit_vad_diagnostics: bool = False,
     ) -> None:
         self.session_id = session_id
         self._buffer = RollingWindowBuffer(RollingWindowConfig(sample_rate_hz=sample_rate_hz))
@@ -93,6 +94,11 @@ class TranscriptionSession:
         # must never break transcription either.
         self._on_turn_boundary = on_turn_boundary
         self._vad = vad or VoiceActivityDetector(TurnDetectionConfig(sample_rate_hz=sample_rate_hz))
+        # Off by default (real cost: one extra event per audio chunk,
+        # every ~0.1-0.5s) — a developer opts in explicitly (see
+        # `VEYA_VAD_DIAGNOSTICS` in `ipc/dispatcher.py`) to see real RMS
+        # vs. threshold on the actual microphone, not a simulated one.
+        self._emit_vad_diagnostics = emit_vad_diagnostics
         self._last_chunk_end_time = 0.0
         self._last_sequence: Optional[int] = None
         self._previous_text = ""
@@ -130,6 +136,18 @@ class TranscriptionSession:
         self._last_chunk_end_time = started_at + duration
         signal = self._vad.process_chunk(pcm, duration)
         await self._process_turn_signal(signal)
+        if self._emit_vad_diagnostics:
+            await self._emit_event(
+                "turn.debug",
+                events.turn_debug(
+                    session_id=self.session_id,
+                    rms=self._vad.last_rms,
+                    threshold=self._vad.speech_rms_threshold,
+                    is_in_speech=self._vad.is_in_speech,
+                    speech_seconds=self._vad.speech_seconds,
+                    silence_seconds=self._vad.silence_seconds,
+                ),
+            )
         self._maybe_schedule_partial_transcription(pcm)
 
         window = self._buffer.add_chunk(pcm)

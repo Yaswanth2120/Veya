@@ -23,6 +23,34 @@ class RecordingEmitter:
 
         await asyncio.wait_for(_wait(), timeout=timeout)
 
+    async def wait_for_event(self, name: str, timeout: float = 2.0) -> dict:
+        """Waits until an event named `name` has been recorded and
+        returns its data — robust against how many *other* events
+        (`question.candidate`, `answer.draft_*`, etc.) fire before or
+        after it, unlike asserting an exact position/count."""
+        async def _wait():
+            while True:
+                match = next((data for n, data in self.events if n == name), None)
+                if match is not None:
+                    return match
+                self._new_event.clear()
+                await self._new_event.wait()
+
+        return await asyncio.wait_for(_wait(), timeout=timeout)
+
+    async def wait_for_nth_event(self, name: str, n: int, timeout: float = 2.0) -> dict:
+        """Waits until the `n`-th (1-indexed) occurrence of `name` has
+        been recorded and returns its data."""
+        async def _wait():
+            while True:
+                matches = [data for evt_name, data in self.events if evt_name == name]
+                if len(matches) >= n:
+                    return matches[n - 1]
+                self._new_event.clear()
+                await self._new_event.wait()
+
+        return await asyncio.wait_for(_wait(), timeout=timeout)
+
     def names(self) -> list[str]:
         return [name for name, _ in self.events]
 
@@ -119,24 +147,30 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await finalize_turn(orchestrator, "Why did the migration take six weeks?", 0.0, 4.0)
-        await emitter.wait_for_count(4)  # question.detected, answer.started, 2x answer.delta, answer.completed
+        await emitter.wait_for_event("answer.completed")
 
         names = emitter.names()
-        self.assertEqual(names[0], "question.detected")
-        self.assertEqual(names[1], "answer.started")
+        self.assertIn("question.detected", names)
+        self.assertIn("answer.started", names)
         self.assertIn("answer.delta", names)
         self.assertEqual(names[-1], "answer.completed")
+        # A strong prompt like this drafts speculatively before the turn
+        # even finalizes (Section 15) — finalize then finds the draft's
+        # text already matches and does not restart generation, so only
+        # one `question.detected` is emitted despite the earlier candidate.
+        self.assertEqual(names.count("question.detected"), 1)
+        self.assertEqual(names.count("answer.started"), 1)
 
-        question_data = emitter.events[0][1]
+        question_data = next(data for name, data in emitter.events if name == "question.detected")
         self.assertEqual(question_data["session_id"], "s1")
         self.assertGreaterEqual(question_data["confidence"], 0.6)
         self.assertIn("question_id", question_data)
 
-        answer_events = [data for name, data in emitter.events if name.startswith("answer.")]
+        answer_events = [data for name, data in emitter.events if name in ("answer.started", "answer.delta", "answer.completed")]
         sequences = {data["sequence"] for data in answer_events}
         self.assertEqual(sequences, {1})
 
-        completed = emitter.events[-1][1]
+        completed = next(data for name, data in emitter.events if name == "answer.completed")
         self.assertEqual(completed["talking_points"], ["staged rollout"])
         self.assertEqual(completed["sources"], [])
 
@@ -155,21 +189,37 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await orchestrator.handle_final_transcript("Q1, explain the deployment risk scoring algorithm in DeployGuard AI", 0.0, 4.0)
+        # A strong spoken prompt like this now drafts speculatively before
+        # the turn finalizes (Section 15) — but it must not be treated as
+        # a *finalized* question yet, and later fragments extending it
+        # must not start a second, competing draft.
+        await asyncio.sleep(0.05)
+        self.assertNotIn("question.detected", emitter.names())
+        self.assertIn("question.candidate", emitter.names())
+
         await orchestrator.handle_final_transcript("and what inputs, weighting, and output threshold", 4.0, 8.0)
         await orchestrator.handle_final_transcript("would you use", 8.0, 9.0)
-        # No question.detected yet — the turn hasn't been finalized.
         await asyncio.sleep(0.05)
-        self.assertEqual(emitter.events, [])
+        self.assertNotIn("question.detected", emitter.names())
+        # Extensions of the same evolving prompt must never start a second
+        # draft — at most one `answer.draft_started` for the whole turn.
+        self.assertEqual(emitter.names().count("answer.draft_started"), 1)
 
         # A real silence endpoint after the last fragment finalizes it.
         await orchestrator.handle_turn_boundary(9.0)
-        await emitter.wait_for_count(1)
+        detected = await emitter.wait_for_event("question.detected")
 
-        self.assertEqual(emitter.events[0][0], "question.detected")
-        detected_text = emitter.events[0][1]["text"]
+        detected_text = detected["text"]
         self.assertIn("deployment risk scoring algorithm", detected_text)
         self.assertIn("inputs, weighting, and output threshold", detected_text)
         self.assertIn("would you use", detected_text)
+
+        await emitter.wait_for_event("answer.completed")
+        # The fuller finalized text differs from what the speculative
+        # draft was originally started on, so finalize correctly replaces
+        # it with one regeneration over the complete question — not two
+        # independent, competing answers.
+        self.assertEqual(emitter.names().count("answer.completed"), 1)
 
         await orchestrator.close()
 
@@ -182,10 +232,10 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         await finalize_turn(orchestrator, "We use a deployment risk score before releases.", 0.0, 4.0)
         await finalize_turn(orchestrator, "Q1, explain the deployment risk scoring algorithm", 4.0, 8.0)
-        await emitter.wait_for_count(4)
+        detected = await emitter.wait_for_event("question.detected")
+        await emitter.wait_for_event("answer.started")
 
-        self.assertEqual(emitter.events[0][0], "question.detected")
-        self.assertEqual(emitter.events[0][1]["text"], "Q1, explain the deployment risk scoring algorithm")
+        self.assertEqual(detected["text"], "Q1, explain the deployment risk scoring algorithm")
         self.assertIn("We use a deployment risk score before releases.", provider.prompts[0])
         await orchestrator.close()
 
@@ -206,16 +256,18 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await orchestrator.handle_turn_boundary(100.0)
         await orchestrator.handle_final_transcript("Explain the caching layer", 0.0, 4.0)
         await asyncio.sleep(0.05)
-        self.assertEqual(emitter.events, [])
+        # A strong spoken prompt drafts speculatively (Section 15) even
+        # though no real turn boundary has been reached yet — but it must
+        # not be treated as finalized.
+        self.assertNotIn("question.detected", emitter.names())
 
         await orchestrator.handle_final_transcript("and its eviction policy", 4.0, 8.0)
         await asyncio.sleep(0.05)
-        self.assertEqual(emitter.events, [])  # boundary at 100.0 still not reached
+        self.assertNotIn("question.detected", emitter.names())  # boundary at 100.0 still not reached
 
         await orchestrator.handle_turn_boundary(8.0)
-        await emitter.wait_for_count(1)
-        self.assertEqual(emitter.events[0][0], "question.detected")
-        self.assertIn("eviction policy", emitter.events[0][1]["text"])
+        detected = await emitter.wait_for_event("question.detected")
+        self.assertIn("eviction policy", detected["text"])
 
         await orchestrator.close()
 
@@ -227,14 +279,15 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         # Speech arrives but no silence endpoint/turn boundary is ever
-        # reported before the session ends.
+        # reported before the session ends. A strong prompt like this
+        # drafts speculatively (Section 15), but must not be treated as
+        # finalized until a real endpoint (here, session close) confirms it.
         await orchestrator.handle_final_transcript("Tell me about yourself", 0.0, 3.0)
         await asyncio.sleep(0.05)
-        self.assertEqual(emitter.events, [])
+        self.assertNotIn("question.detected", emitter.names())
 
         await orchestrator.close()
-        await emitter.wait_for_count(1)
-        self.assertEqual(emitter.events[0][0], "question.detected")
+        await emitter.wait_for_event("question.detected")
 
     async def test_a_new_question_cancels_a_still_running_previous_answer(self):
         emitter = RecordingEmitter()
@@ -244,10 +297,10 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await finalize_turn(orchestrator, "Why did the first thing happen?", 0.0, 4.0)
-        await emitter.wait_for_count(2)  # question.detected, answer.started for sequence 1
+        await emitter.wait_for_event("answer.started")  # sequence 1 actually started generating
 
         await finalize_turn(orchestrator, "How did the second thing happen?", 4.0, 8.0)
-        await emitter.wait_for_count(4)  # + question.detected, answer.started for sequence 2
+        await emitter.wait_for_nth_event("answer.started", 2)
 
         # The first answer never reaches answer.completed — it was
         # superseded, not left to finish in the background.
@@ -277,6 +330,50 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         names = emitter.names()
         self.assertNotIn("answer.completed", names)
 
+    async def test_a_strong_prompt_is_answered_even_when_no_vad_boundary_ever_arrives(self):
+        # A review found that a real, obviously-complete interview prompt
+        # ("Tell me about yourself.") could sit unanswered indefinitely if
+        # continuous background noise/an interviewer who keeps talking/an
+        # RMS-threshold merge meant VAD's 1.2s silence endpoint never
+        # arrived — `handle_turn_boundary` is simply never called here,
+        # exactly reproducing that condition. The strong-prompt debounce
+        # must still answer it without any VAD boundary at all.
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: about me\nPOINTS:\n- a point\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_final_transcript("Tell me about yourself.", 0.0, 3.0)
+        # No handle_turn_boundary call anywhere in this test.
+        detected = await emitter.wait_for_event("question.detected", timeout=3.0)
+        self.assertEqual(detected["text"], "Tell me about yourself.")
+        await orchestrator.close()
+
+    async def test_speculative_debounce_is_reset_by_a_new_fragment_extending_the_same_turn(self):
+        # A strong prompt that keeps being extended by further speech
+        # (still no VAD boundary) must not be cut off mid-thought by the
+        # debounce firing on stale, incomplete text.
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: ok\nPOINTS:\n- a\n"])
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_final_transcript("What was the specific bottleneck", 0.0, 2.0)
+        await asyncio.sleep(0.4)  # well under the debounce window
+        self.assertNotIn("question.detected", emitter.names())
+        self.assertEqual(emitter.names().count("answer.draft_started"), 1)  # drafted speculatively, exactly once
+        await orchestrator.handle_final_transcript("causing latency in the checkout service", 2.0, 4.0)
+
+        detected = await emitter.wait_for_event("question.detected", timeout=3.0)
+        self.assertIn("bottleneck", detected["text"])
+        self.assertIn("checkout service", detected["text"])
+        # A pure extension of the same evolving prompt must never start a
+        # second, competing draft.
+        self.assertEqual(emitter.names().count("answer.draft_started"), 1)
+        await orchestrator.close()
+
     async def test_provider_failure_mid_stream_still_emits_a_completed_event_so_ui_never_hangs(self):
         emitter = RecordingEmitter()
         orchestrator = ConversationOrchestrator(
@@ -284,11 +381,7 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await finalize_turn(orchestrator, "Why did this fail?", 0.0, 4.0)
-        await emitter.wait_for_count(3)  # question.detected, answer.started, answer.completed (degraded)
-
-        names = emitter.names()
-        self.assertEqual(names[-1], "answer.completed")
-        completed = emitter.events[-1][1]
+        completed = await emitter.wait_for_event("answer.completed")
         self.assertTrue(completed["talking_points"])  # a status message, not empty/hung
         self.assertEqual(completed["sources"], [])
 
@@ -322,10 +415,13 @@ class SemanticClassifierFallbackTests(unittest.IsolatedAsyncioTestCase):
             llm_provider=JSONProvider(),
         )
         await finalize_turn(orchestrator, _AMBIGUOUS_TEXT, 0.0, 2.0)
-        await emitter.wait_for_count(2)  # question.classifying, question.detected
-        self.assertEqual(emitter.names()[0], "question.classifying")
-        self.assertEqual(emitter.events[1][0], "question.detected")
-        self.assertEqual(emitter.events[1][1]["text"], "What would you improve about the caching strategy?")
+        detected = await emitter.wait_for_event("question.detected")
+        # Sub-threshold on its own, so it's tracked as a candidate but
+        # never drafted speculatively — classification is what confirms it.
+        self.assertIn("question.candidate", emitter.names())
+        self.assertNotIn("answer.draft_started", emitter.names())
+        self.assertIn("question.classifying", emitter.names())
+        self.assertEqual(detected["text"], "What would you improve about the caching strategy?")
         await orchestrator.close()
 
     async def test_malformed_semantic_response_falls_back_safely_without_crashing(self):
@@ -375,8 +471,13 @@ class SemanticClassifierFallbackTests(unittest.IsolatedAsyncioTestCase):
             llm_provider=RejectingProvider(),
         )
         await finalize_turn(orchestrator, _AMBIGUOUS_TEXT, 0.0, 2.0)
-        await emitter.wait_for_count(2)
-        self.assertEqual(emitter.names(), ["question.classifying", "question.rejected"])
+        await emitter.wait_for_event("question.rejected")
+        # Sub-threshold on its own — tracked as a candidate, never drafted.
+        self.assertNotIn("answer.draft_started", emitter.names())
+        self.assertEqual(
+            [n for n in emitter.names() if n in ("question.classifying", "question.rejected")],
+            ["question.classifying", "question.rejected"],
+        )
         await orchestrator.close()
 
 
@@ -434,9 +535,7 @@ class GroundedAnswerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await finalize_turn(orchestrator, "Why did the migration take six weeks?", 0.0, 4.0)
-        await emitter.wait_for_count(4)
-
-        completed = emitter.events[-1][1]
+        completed = await emitter.wait_for_event("answer.completed")
         self.assertTrue(completed["sources"])
         self.assertEqual(completed["sources"][0]["document_id"], "doc1")
         self.assertEqual(completed["sources"][0]["file_name"], "notes.txt")
@@ -459,9 +558,7 @@ class GroundedAnswerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await finalize_turn(orchestrator, "Why did the migration take six weeks?", 0.0, 4.0)
-        await emitter.wait_for_count(4)
-
-        completed = emitter.events[-1][1]
+        completed = await emitter.wait_for_event("answer.completed")
         self.assertEqual(completed["sources"], [])
         self.assertNotIn("notes.txt", provider.prompts[0])
 
@@ -480,9 +577,7 @@ class GroundedAnswerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await finalize_turn(orchestrator, "Why did the migration take six weeks?", 0.0, 4.0)
-        await emitter.wait_for_count(4)
-
-        completed = emitter.events[-1][1]
+        completed = await emitter.wait_for_event("answer.completed")
         self.assertEqual(completed["sources"], [])
 
         await orchestrator.close()
@@ -495,9 +590,7 @@ class GroundedAnswerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await finalize_turn(orchestrator, "Why did the migration take six weeks?", 0.0, 4.0)
-        await emitter.wait_for_count(4)
-
-        completed = emitter.events[-1][1]
+        completed = await emitter.wait_for_event("answer.completed")
         self.assertEqual(completed["sources"], [])
 
         await orchestrator.close()

@@ -104,6 +104,19 @@ final class IPCEventRouter {
             else { return }
             state.setTurnState(turnState)
 
+        case "turn.debug":
+            guard let data: TurnDebugEventData = decode(event, matching: \.sessionId) else { return }
+            state.recordVADDiagnostic(
+                ConversationState.VADDiagnosticSample(
+                    rms: data.rms,
+                    threshold: data.threshold,
+                    isInSpeech: data.isInSpeech,
+                    speechSeconds: data.speechSeconds,
+                    silenceSeconds: data.silenceSeconds,
+                    receivedAt: Date()
+                )
+            )
+
         case "question.classifying":
             guard let _: QuestionClassifyingEventData = decode(event, matching: \.sessionId) else { return }
             state.setClassifyingQuestion(true)

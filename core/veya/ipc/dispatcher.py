@@ -16,12 +16,14 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Union
 
 from .errors import ErrorCode, ProtocolError
 from .protocol import PROTOCOL_VERSION, Request
 from ..transcription.engine import TranscriptionEngine, TranscriptionSetupError, default_whisper_engine_factory
 from ..transcription.session import TranscriptionSession
+from ..transcription.streaming_provider import WhisperCppStreamingProvider, resolve_streaming_binary_path
+from ..transcription.streaming_session import StreamingTranscriptionSession
 from ..conversation.models import SessionContext
 from ..conversation.orchestrator import ConversationOrchestrator
 from ..knowledge.embeddings import EmbeddingProvider, default_embedding_provider_factory
@@ -107,7 +109,7 @@ class WorkerContext:
     shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     active_session_id: Optional[str] = None
     feed_task: Optional[asyncio.Task] = None
-    transcription_session: Optional[TranscriptionSession] = None
+    transcription_session: Optional[Union[TranscriptionSession, StreamingTranscriptionSession]] = None
     transcription_engine_factory: Callable[[], TranscriptionEngine] = field(
         default=default_whisper_engine_factory
     )
@@ -401,16 +403,51 @@ async def _handle_transcription_start(params: dict, context: WorkerContext) -> d
     )
     context.conversation_orchestrator = orchestrator
 
-    context.transcription_session = TranscriptionSession(
-        session_id=session_id,
-        sample_rate_hz=sample_rate_hz,
-        engine=engine,
-        emit_event=context.emit_event,
-        on_final_transcript=orchestrator.handle_final_transcript,
-        on_turn_boundary=orchestrator.handle_turn_boundary,
-    )
-    logger.info("transcription.start session_id=%s sample_rate_hz=%s", session_id, sample_rate_hz)
-    return {"ok": True, "answer_intelligence_available": llm_provider is not None}
+    emit_vad_diagnostics = os.environ.get("VEYA_VAD_DIAGNOSTICS") == "1"
+
+    # Section 15: prefer the genuine incremental streaming engine
+    # (`whisper-stream-stdin`) — real partial hypotheses roughly every
+    # second, not just a final transcript once a fixed ~4s window
+    # completes. Only falls back to the older rolling-window batch-CLI
+    # `TranscriptionSession` when the streaming binary genuinely isn't
+    # available; that fallback is reported honestly via
+    # `asr_provider: "degraded_batch"` below, never silently presented as
+    # the real-time engine.
+    stream_binary = resolve_streaming_binary_path()
+    model_path = os.environ.get("VEYA_WHISPER_MODEL")
+    if stream_binary is not None and model_path:
+        streaming_provider = WhisperCppStreamingProvider(
+            binary_path=stream_binary, model_path=Path(model_path), sample_rate_hz=sample_rate_hz,
+        )
+        context.transcription_session = StreamingTranscriptionSession(
+            session_id=session_id,
+            sample_rate_hz=sample_rate_hz,
+            streaming_provider=streaming_provider,
+            emit_event=context.emit_event,
+            on_final_transcript=orchestrator.handle_final_transcript,
+            on_turn_boundary=orchestrator.handle_turn_boundary,
+            emit_vad_diagnostics=emit_vad_diagnostics,
+        )
+        asr_provider = "streaming"
+    else:
+        context.transcription_session = TranscriptionSession(
+            session_id=session_id,
+            sample_rate_hz=sample_rate_hz,
+            engine=engine,
+            emit_event=context.emit_event,
+            on_final_transcript=orchestrator.handle_final_transcript,
+            on_turn_boundary=orchestrator.handle_turn_boundary,
+            # Opt-in only (`VEYA_VAD_DIAGNOSTICS=1`) — a real developer
+            # diagnostics screen needs real RMS/threshold/state per chunk to
+            # verify VAD behavior against the actual microphone, but every
+            # ordinary session should not pay the cost of an extra event per
+            # audio chunk.
+            emit_vad_diagnostics=emit_vad_diagnostics,
+        )
+        asr_provider = "degraded_batch"
+
+    logger.info("transcription.start session_id=%s sample_rate_hz=%s asr_provider=%s", session_id, sample_rate_hz, asr_provider)
+    return {"ok": True, "answer_intelligence_available": llm_provider is not None, "asr_provider": asr_provider}
 
 
 async def _handle_transcription_audio_chunk(params: dict, context: WorkerContext) -> dict:

@@ -32,6 +32,9 @@ struct LiveSessionView: View {
                session.sessionType == .codingPractice || session.sessionType == .systemDesign {
                 CopilotWorkbenchView(session: session)
             }
+            #if DEBUG
+            VADDiagnosticsView(conversationState: conversationState)
+            #endif
         }
         .padding(28)
         .task {

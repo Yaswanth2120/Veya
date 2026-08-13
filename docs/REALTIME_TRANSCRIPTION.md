@@ -211,6 +211,36 @@ or points at a missing/non-executable file, `transcription.start` returns
 variables set in the shell that launches the app (or `swift test`) reach
 the Python worker subprocess unchanged.
 
+### Real-time streaming engine (Section 15)
+
+The CLI path above only ever produces a transcript once a whole ~4s
+window completes — genuinely real-time behavior needs a persistent,
+incremental engine instead. `packaging/whisper-stream-stdin/` (tracked in
+*this* repo, since `whisper.cpp/` itself is gitignored — see below) is a
+small additional whisper.cpp example: `examples/stream/stream.cpp`'s own
+real-time sliding-window algorithm, with its SDL2 live-microphone capture
+replaced by a stdin PCM reader, so Swift stays the app's one and only
+microphone owner. It emits JSON-Lines partial/final hypotheses to stdout
+as it re-decodes a bounded, sliding trailing window roughly once a
+second — a real persistent process, not a batch CLI invoked repeatedly.
+
+Install and build it into your local whisper.cpp checkout:
+
+```sh
+packaging/install_streaming_asr_source.sh          # defaults to ./whisper.cpp
+cmake --build whisper.cpp/build --target whisper-stream-stdin
+```
+
+`veya/transcription/streaming_provider.py`'s `resolve_streaming_binary_path()`
+looks for a `whisper-stream-stdin` binary next to `VEYA_WHISPER_BIN`
+automatically (or `VEYA_WHISPER_STREAM_BIN` explicitly) — no extra env
+var is required if both binaries live in the same directory, which is
+exactly how `packaging/build_app.sh` bundles them. When the streaming
+binary is available, `transcription.start` uses it as the primary engine
+(`asr_provider: "streaming"` in its response); otherwise it falls back to
+the batch CLI path above, reported honestly as `asr_provider:
+"degraded_batch"` — never silently presented as the same thing.
+
 ## Environment configuration
 
 | Variable              | Meaning                                    | Required for real transcription |

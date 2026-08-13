@@ -356,6 +356,15 @@ struct TurnStateEventData: Decodable, Sendable {
     let state: String
 }
 
+struct TurnDebugEventData: Decodable, Sendable {
+    let sessionId: String
+    let rms: Double
+    let threshold: Double
+    let isInSpeech: Bool
+    let speechSeconds: Double
+    let silenceSeconds: Double
+}
+
 struct QuestionClassifyingEventData: Decodable, Sendable {
     let sessionId: String
 }

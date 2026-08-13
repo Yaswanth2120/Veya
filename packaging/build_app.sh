@@ -39,11 +39,24 @@ echo "==> Copying Whisper model manifest (metadata only — no model bytes bundl
 cp "$REPO_ROOT/packaging/whisper_model_manifest.json" "$CONTENTS/Resources/whisper_model_manifest.json"
 
 if [ -x "$REPO_ROOT/whisper.cpp/build/bin/whisper-cli" ]; then
-  echo "==> Bundling whisper-cli binary"
+  echo "==> Bundling whisper-cli binary (degraded-fallback transcription engine)"
   mkdir -p "$CONTENTS/Resources/whisper-bin"
   cp "$REPO_ROOT/whisper.cpp/build/bin/whisper-cli" "$CONTENTS/Resources/whisper-bin/whisper-cli"
 else
   echo "==> No local whisper-cli build found at whisper.cpp/build/bin/whisper-cli — skipping (real transcription will stay unavailable in this bundle until one is added)"
+fi
+
+# Section 15: the genuine incremental streaming ASR engine — real partial
+# hypotheses roughly every second, not just a batch transcript once a
+# fixed window completes. `dispatcher.py` prefers this over whisper-cli
+# whenever both are present; whisper-cli above remains the degraded
+# fallback if this one is ever missing.
+if [ -x "$REPO_ROOT/whisper.cpp/build/bin/whisper-stream-stdin" ]; then
+  echo "==> Bundling whisper-stream-stdin binary (real-time streaming transcription engine)"
+  mkdir -p "$CONTENTS/Resources/whisper-bin"
+  cp "$REPO_ROOT/whisper.cpp/build/bin/whisper-stream-stdin" "$CONTENTS/Resources/whisper-bin/whisper-stream-stdin"
+else
+  echo "==> No local whisper-stream-stdin build found — skipping (this bundle will use the degraded batch-CLI fallback for real transcription until one is added)"
 fi
 
 echo "==> Copying veya worker source"

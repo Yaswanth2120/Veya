@@ -235,6 +235,26 @@ struct IPCEventRouterTests {
         #expect(state.turnState == .listening)
     }
 
+    @Test("turn.debug appends a real VAD diagnostic sample")
+    func turnDebugRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent(
+                "turn.debug",
+                #"{"session_id":"\#(sessionID.uuidString)","rms":812.5,"threshold":400,"is_in_speech":true,"speech_seconds":1.2,"silence_seconds":0.0}"#
+            )
+        )
+
+        #expect(state.vadDiagnostics.count == 1)
+        #expect(state.vadDiagnostics[0].rms == 812.5)
+        #expect(state.vadDiagnostics[0].threshold == 400)
+        #expect(state.vadDiagnostics[0].isInSpeech == true)
+    }
+
     @Test("question.classifying sets isClassifyingQuestion, cleared by question.detected")
     func questionClassifyingThenDetected() async throws {
         let sessionID = UUID()

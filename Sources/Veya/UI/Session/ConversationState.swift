@@ -57,6 +57,24 @@ final class ConversationState: ObservableObject {
     /// canned pipeline has no equivalent classification step.
     @Published private(set) var isClassifyingQuestion = false
 
+    /// One real, raw local-VAD measurement per audio chunk — only ever
+    /// populated when Python's `VEYA_VAD_DIAGNOSTICS=1` is set (see
+    /// `DeveloperDiagnosticsView`). Exists so real microphone behavior
+    /// (was a chunk actually classified as speech, and why) can be
+    /// verified directly, rather than inferred from whether an answer
+    /// eventually appeared.
+    struct VADDiagnosticSample: Identifiable, Sendable {
+        let id = UUID()
+        let rms: Double
+        let threshold: Double
+        let isInSpeech: Bool
+        let speechSeconds: Double
+        let silenceSeconds: Double
+        let receivedAt: Date
+    }
+    @Published private(set) var vadDiagnostics: [VADDiagnosticSample] = []
+    private static let maxRetainedVADDiagnostics = 200
+
     let sessionID: UUID
     private let repository: ConversationRepository
     private var transcriptTask: Task<Void, Never>?
@@ -160,6 +178,13 @@ final class ConversationState: ObservableObject {
 
     func setClassifyingQuestion(_ classifying: Bool) {
         isClassifyingQuestion = classifying
+    }
+
+    func recordVADDiagnostic(_ sample: VADDiagnosticSample) {
+        vadDiagnostics.append(sample)
+        if vadDiagnostics.count > Self.maxRetainedVADDiagnostics {
+            vadDiagnostics.removeFirst(vadDiagnostics.count - Self.maxRetainedVADDiagnostics)
+        }
     }
 
     func ingestDetectedQuestion(_ question: DetectedQuestion) async {

@@ -110,6 +110,83 @@ def question_classifying(session_id: str) -> dict:
     return {"session_id": session_id}
 
 
+def turn_debug(
+    session_id: str,
+    rms: float,
+    threshold: int,
+    is_in_speech: bool,
+    speech_seconds: float,
+    silence_seconds: float,
+) -> dict:
+    """Real local VAD diagnostics for one processed audio chunk — the raw
+    RMS amplitude and threshold it was compared against, never transcript
+    content. Only emitted when diagnostics are explicitly enabled (see
+    `VEYA_VAD_DIAGNOSTICS` in `transcription/session.py`); lets a developer
+    screen show *why* a turn boundary did or didn't fire against real
+    microphone input, rather than only Whisper's eventual text output."""
+    return {
+        "session_id": session_id,
+        "rms": rms,
+        "threshold": threshold,
+        "is_in_speech": is_in_speech,
+        "speech_seconds": speech_seconds,
+        "silence_seconds": silence_seconds,
+    }
+
+
+# MARK: - Question candidate / draft answer lifecycle (Section 15)
+#
+# Additive alongside the Section 8/14 `question.detected`/`answer.started`/
+# `answer.delta`/`answer.completed`/`question.rejected` events (kept
+# unchanged for backward compatibility) — these give Swift the finer-
+# grained "candidate spotted, still speaking" / "drafting before the
+# turn is even finalized" / "refining" states the product spec requires,
+# without breaking the existing stable contract.
+
+
+def question_candidate(session_id: str, text: str) -> dict:
+    """A still-open turn now plausibly reads as an answer request — may
+    still be extended, replaced, or rejected before it finalizes."""
+    return {"session_id": session_id, "text": text}
+
+
+def question_updated(session_id: str, text: str) -> dict:
+    """Later speech extended the current candidate's text without
+    changing its meaning — same underlying question, more of it."""
+    return {"session_id": session_id, "text": text}
+
+
+def question_finalized(session_id: str, question_id: str, text: str, confidence: float) -> dict:
+    """The turn reached a real boundary (VAD/stop/max-duration) or a
+    stability debounce and was classified as an answer request."""
+    return {"session_id": session_id, "question_id": question_id, "text": text, "confidence": confidence}
+
+
+def answer_draft_started(session_id: str, question_id: str, sequence: int) -> dict:
+    """A generation began speculatively, before the turn was finalized —
+    may still be replaced or refined."""
+    return {"session_id": session_id, "question_id": question_id, "sequence": sequence}
+
+
+def answer_draft_delta(session_id: str, question_id: str, delta: str, sequence: int) -> dict:
+    return {"session_id": session_id, "question_id": question_id, "delta": delta, "sequence": sequence}
+
+
+def answer_draft_replaced(session_id: str, question_id: str, sequence: int) -> dict:
+    """A new generation is superseding a still-active previous one for
+    this turn (materially different text, or a finalize-triggered
+    refinement pass) — Swift should discard whatever the previous
+    sequence had streamed and start fresh, never show both."""
+    return {"session_id": session_id, "question_id": question_id, "sequence": sequence}
+
+
+def answer_cancelled(session_id: str, question_id: str, sequence: int) -> dict:
+    """A draft was cancelled with no replacement following it (e.g. the
+    finalized turn was ultimately classified as not an answer request, or
+    an explicit `answer.cancel`)."""
+    return {"session_id": session_id, "question_id": question_id, "sequence": sequence}
+
+
 def question_rejected(session_id: str) -> dict:
     """Emitted when a finalized turn was classified as not an
     answer-request — lets Swift return to "Listening" instead of being
