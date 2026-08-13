@@ -171,6 +171,13 @@ final class DatabaseManager: Sendable {
             }
         }
 
+        migrator.registerMigration("v5_addSessionTypeSpecificFields") { db in
+            try db.alter(table: Session.databaseTableName) { t in
+                t.add(column: "codeExecutionConsent", .boolean).notNull().defaults(to: false)
+                t.add(column: "expectedScale", .text).notNull().defaults(to: "")
+            }
+        }
+
         try migrator.migrate(dbWriter)
     }
 }

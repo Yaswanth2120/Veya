@@ -87,6 +87,27 @@ class CodeWorkspaceStore:
             last_start = start
         return self.upsert_file(session_id, name, file.language, content, base_version)
 
+    def delete_file(self, session_id: str, name: str) -> None:
+        files = self._load(session_id)
+        if name not in files:
+            raise ProtocolError(ErrorCode.SESSION_NOT_FOUND, "The requested code file does not exist.")
+        del files[name]
+        self._save(session_id, files)
+
+    def rename_file(self, session_id: str, name: str, new_name: str) -> CodeFile:
+        self._validate_name(new_name)
+        files = self._load(session_id)
+        file = files.get(name)
+        if file is None:
+            raise ProtocolError(ErrorCode.SESSION_NOT_FOUND, "The requested code file does not exist.")
+        if new_name in files:
+            raise ProtocolError(ErrorCode.INVALID_PARAMS, "A file with that name already exists.")
+        renamed = CodeFile(name=new_name, language=file.language, content=file.content, version=file.version, history=file.history)
+        del files[name]
+        files[new_name] = renamed
+        self._save(session_id, files)
+        return renamed
+
     def append_history(self, session_id: str, name: str, operation: str, request: str, explanation: str) -> CodeFile:
         files = self._load(session_id)
         file = files.get(name)

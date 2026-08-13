@@ -62,6 +62,16 @@ struct Session: Identifiable, Codable, Equatable, FetchableRecord, PersistableRe
     var status: SessionStatus
     var createdAt: Date
     var endedAt: Date?
+    /// Coding Practice only: explicit user consent for local code
+    /// execution *in this session*. Execution is still gated first by the
+    /// worker-level `VEYA_CODE_EXECUTION_ENABLED` build setting — this is
+    /// a second, session-scoped layer the Coding Workbench's Run action
+    /// also requires, never a substitute for the build-level gate.
+    var codeExecutionConsent: Bool = false
+    /// System Design only: free-text expected scale/traffic context
+    /// (e.g. "100M redirects/day"), shown to the user and folded into the
+    /// design follow-up prompt alongside the description field.
+    var expectedScale: String = ""
 
     static let databaseTableName = "session"
 }

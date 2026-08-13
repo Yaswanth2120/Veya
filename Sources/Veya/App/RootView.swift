@@ -3,36 +3,25 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var coordinator: AppCoordinator
 
+    /// The sidebar is hidden during a Live Session — that view is meant
+    /// to be immersive/full-width, and navigating away mid-session via the
+    /// sidebar would be a way to silently abandon it without going
+    /// through `endLiveSession()`.
+    private var showsSidebar: Bool {
+        coordinator.route != .liveSession
+    }
+
     var body: some View {
         Group {
-            switch coordinator.route {
-            case .dashboard:
-                DashboardView()
-            case .createSession:
-                CreateSessionView()
-            case .liveSession:
-                if let state = coordinator.conversationState {
-                    LiveSessionView(
-                        conversationState: state,
-                        pythonIntelligenceCoordinator: coordinator.pythonIntelligenceCoordinator
-                    )
-                } else {
-                    DashboardView()
+            if showsSidebar {
+                HStack(spacing: 0) {
+                    SidebarView()
+                    Divider()
+                    content
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            case .previousSessions:
-                PreviousSessionsView()
-            case .knowledgeBase:
-                KnowledgeBaseView()
-            case .personalProfile:
-                PersonalProfileView()
-            case .settings:
-                SettingsView()
-            case .presenterPrivacy:
-                PresenterPrivacySettingsView(privacyManager: coordinator.presenterPrivacyManager)
-            case .memory:
-                MemoryReviewView()
-            case .localAIStatus:
-                LocalAIStatusView()
+            } else {
+                content
             }
         }
         .confirmationDialog(
@@ -53,6 +42,39 @@ struct RootView: View {
             Button("OK") { coordinator.lastActionError = nil }
         } message: { message in
             Text(message)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch coordinator.route {
+        case .dashboard:
+            DashboardView()
+        case .createSession:
+            CreateSessionView()
+        case .liveSession:
+            if let state = coordinator.conversationState {
+                LiveSessionView(
+                    conversationState: state,
+                    pythonIntelligenceCoordinator: coordinator.pythonIntelligenceCoordinator
+                )
+            } else {
+                DashboardView()
+            }
+        case .previousSessions:
+            PreviousSessionsView()
+        case .knowledgeBase:
+            KnowledgeBaseView()
+        case .personalProfile:
+            PersonalProfileView()
+        case .settings:
+            SettingsView()
+        case .presenterPrivacy:
+            PresenterPrivacySettingsView(privacyManager: coordinator.presenterPrivacyManager)
+        case .memory:
+            MemoryReviewView()
+        case .localAIStatus:
+            LocalAIStatusView()
         }
     }
 

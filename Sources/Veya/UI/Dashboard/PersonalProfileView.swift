@@ -23,14 +23,19 @@ struct PersonalProfileView: View {
                         Text(style.displayName).tag(style)
                     }
                 }
-                TextField("Default programming language", text: $viewModel.defaultProgrammingLanguage)
+                ProgrammingLanguagePicker(selection: $viewModel.defaultProgrammingLanguage)
             }
             .formStyle(.grouped)
 
-            Button("Save") {
-                Task { await viewModel.save() }
+            HStack {
+                Button("Save") {
+                    Task { await viewModel.save() }
+                }
+                .buttonStyle(.borderedProminent)
+                if viewModel.didSave {
+                    Label("Saved", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
+                }
             }
-            .buttonStyle(.borderedProminent)
 
             Spacer()
         }
@@ -46,6 +51,7 @@ final class PersonalProfileViewModel: ObservableObject {
     @Published var background = ""
     @Published var defaultAnswerStyle: AnswerStyle = .concise
     @Published var defaultProgrammingLanguage = ""
+    @Published private(set) var didSave = false
 
     private var profileID = UUID()
     private let repository = UserProfileRepository()
@@ -71,5 +77,6 @@ final class PersonalProfileViewModel: ObservableObject {
             updatedAt: Date()
         )
         try? await repository.save(profile)
+        didSave = true
     }
 }

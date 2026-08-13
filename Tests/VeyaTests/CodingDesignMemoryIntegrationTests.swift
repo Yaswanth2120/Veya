@@ -76,6 +76,29 @@ struct CodingDesignMemoryIntegrationTests {
         await manager.stop()
     }
 
+    @Test("coding.rename_file and coding.delete_file round-trip through the real worker")
+    func codingFileManagementRoundTrip() async throws {
+        let manager = makeManager()
+        await manager.start()
+        #expect(manager.state == .ready)
+
+        let sessionID = UUID().uuidString
+        _ = try await manager.call(
+            method: "coding.upsert_file",
+            params: CodingUpsertFileParams(sessionId: sessionID, name: "main.py", language: "python", content: "x = 1", baseVersion: nil)
+        ) as CodeFileResult
+
+        let renamed: CodeFileResult = try await manager.call(method: "coding.rename_file", params: CodingRenameFileParams(sessionId: sessionID, name: "main.py", newName: "solution.py"))
+        #expect(renamed.name == "solution.py")
+        #expect(renamed.content == "x = 1")
+
+        let _: OkResult = try await manager.call(method: "coding.delete_file", params: CodingFileParams(sessionId: sessionID, name: "solution.py"))
+        let files: CodingFilesResult = try await manager.call(method: "coding.list_files", params: SessionIdentifierParams(sessionId: sessionID))
+        #expect(files.files.isEmpty)
+
+        await manager.stop()
+    }
+
     @Test("design.replace, design.get, and every design.export format round-trip through the real worker")
     func designStateAndExportRoundTrip() async throws {
         let manager = makeManager()

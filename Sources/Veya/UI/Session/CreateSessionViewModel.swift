@@ -19,6 +19,8 @@ final class CreateSessionViewModel: ObservableObject {
     @Published var preferredAnswerStyle: AnswerStyle = .concise
     @Published var preferredProgrammingLanguage = ""
     @Published var customInstructions = ""
+    @Published var codeExecutionConsent = false
+    @Published var expectedScale = ""
 
     @Published var attachedDocuments: [PendingDocument] = []
     @Published var isFileImporterPresented = false
@@ -80,7 +82,9 @@ final class CreateSessionViewModel: ObservableObject {
             customInstructions: customInstructions,
             status: .notStarted,
             createdAt: Date(),
-            endedAt: nil
+            endedAt: nil,
+            codeExecutionConsent: codeExecutionConsent,
+            expectedScale: expectedScale
         )
 
         do {

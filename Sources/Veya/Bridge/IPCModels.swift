@@ -217,6 +217,7 @@ struct KnowledgeRetrieveResult: Decodable, Sendable {
 // MARK: - Coding / system-design workbench (Sections 11–12)
 
 struct CodingFileParams: Encodable, Sendable { let sessionId: String; let name: String }
+struct CodingRenameFileParams: Encodable, Sendable { let sessionId: String; let name: String; let newName: String }
 struct CodingUpsertFileParams: Encodable, Sendable { let sessionId: String; let name: String; let language: String; let content: String; let baseVersion: Int? }
 struct CodingEdit: Codable, Equatable, Sendable { let start: Int; let end: Int; let replacement: String }
 struct CodingApplyEditsParams: Encodable, Sendable { let sessionId: String; let name: String; let baseVersion: Int; let edits: [CodingEdit] }

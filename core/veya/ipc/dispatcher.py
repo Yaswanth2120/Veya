@@ -559,6 +559,24 @@ async def _handle_coding_apply_edits(params: dict, context: WorkerContext) -> di
     return {"name": item.name, "language": item.language, "content": item.content, "version": item.version}
 
 
+async def _handle_coding_delete_file(params: dict, context: WorkerContext) -> dict:
+    session_id = _code_session_id(params)
+    name = params.get("name")
+    if not isinstance(name, str) or not name:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'name' is required and must be a string.")
+    _get_or_create_code_workspace_store(context).delete_file(session_id, name)
+    return {"ok": True}
+
+
+async def _handle_coding_rename_file(params: dict, context: WorkerContext) -> dict:
+    session_id = _code_session_id(params)
+    name, new_name = params.get("name"), params.get("new_name")
+    if not isinstance(name, str) or not name or not isinstance(new_name, str) or not new_name:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'name' and 'new_name' are required strings.")
+    item = _get_or_create_code_workspace_store(context).rename_file(session_id, name, new_name)
+    return {"name": item.name, "language": item.language, "content": item.content, "version": item.version}
+
+
 async def _handle_coding_analyze(params: dict, context: WorkerContext) -> dict:
     session_id = _code_session_id(params)
     name = params.get("name")
@@ -811,6 +829,8 @@ _HANDLERS: dict[str, Handler] = {
     "coding.list_files": _handle_coding_list_files,
     "coding.upsert_file": _handle_coding_upsert_file,
     "coding.apply_edits": _handle_coding_apply_edits,
+    "coding.delete_file": _handle_coding_delete_file,
+    "coding.rename_file": _handle_coding_rename_file,
     "coding.analyze": _handle_coding_analyze,
     "coding.run": _handle_coding_run,
     "coding.assist": _handle_coding_assist,

@@ -41,3 +41,57 @@ class CodingDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
 async def _ignore_event(name, data):
     return None
+
+
+class CodeWorkspaceFileManagementTests(unittest.TestCase):
+    def test_delete_file_removes_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = CodeWorkspaceStore(Path(temporary))
+            store.upsert_file("session-1", "main.py", "python", "x = 1", None)
+            store.delete_file("session-1", "main.py")
+            self.assertIsNone(store.get_file("session-1", "main.py"))
+
+    def test_delete_missing_file_is_session_not_found(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = CodeWorkspaceStore(Path(temporary))
+            with self.assertRaises(ProtocolError) as raised:
+                store.delete_file("session-1", "missing.py")
+            self.assertEqual(raised.exception.code, ErrorCode.SESSION_NOT_FOUND)
+
+    def test_rename_file_preserves_content_version_and_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = CodeWorkspaceStore(Path(temporary))
+            store.upsert_file("session-1", "main.py", "python", "x = 1", None)
+            store.append_history("session-1", "main.py", "explain", "what does this do", "it sets x")
+            renamed = store.rename_file("session-1", "main.py", "solution.py")
+
+            self.assertEqual(renamed.name, "solution.py")
+            self.assertEqual(renamed.content, "x = 1")
+            self.assertEqual(renamed.version, 1)
+            self.assertEqual(len(renamed.history), 1)
+            self.assertIsNone(store.get_file("session-1", "main.py"))
+            self.assertIsNotNone(store.get_file("session-1", "solution.py"))
+
+    def test_rename_to_an_existing_name_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = CodeWorkspaceStore(Path(temporary))
+            store.upsert_file("session-1", "a.py", "python", "1", None)
+            store.upsert_file("session-1", "b.py", "python", "2", None)
+            with self.assertRaises(ProtocolError) as raised:
+                store.rename_file("session-1", "a.py", "b.py")
+            self.assertEqual(raised.exception.code, ErrorCode.INVALID_PARAMS)
+
+
+class CodingFileManagementRPCTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_and_rename_rpcs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            context = WorkerContext(emit_event=_ignore_event, coding_workspace_directory=Path(temporary))
+            dispatcher = Dispatcher()
+            await dispatcher.dispatch(Request(id="1", method="coding.upsert_file", params={"session_id": "s-1", "name": "main.py", "language": "python", "content": "x = 1"}), context)
+
+            renamed = await dispatcher.dispatch(Request(id="2", method="coding.rename_file", params={"session_id": "s-1", "name": "main.py", "new_name": "solution.py"}), context)
+            self.assertEqual(renamed["name"], "solution.py")
+
+            await dispatcher.dispatch(Request(id="3", method="coding.delete_file", params={"session_id": "s-1", "name": "solution.py"}), context)
+            files = await dispatcher.dispatch(Request(id="4", method="coding.list_files", params={"session_id": "s-1"}), context)
+            self.assertEqual(files["files"], [])

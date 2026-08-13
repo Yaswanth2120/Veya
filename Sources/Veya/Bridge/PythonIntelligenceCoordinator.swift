@@ -223,6 +223,14 @@ final class PythonIntelligenceCoordinator: ObservableObject {
         try await workerManager.call(method: "coding.apply_edits", params: CodingApplyEditsParams(sessionId: sessionID.uuidString, name: name, baseVersion: baseVersion, edits: edits))
     }
 
+    func deleteCodeFile(sessionID: UUID, name: String) async throws {
+        let _: OkResult = try await workerManager.call(method: "coding.delete_file", params: CodingFileParams(sessionId: sessionID.uuidString, name: name))
+    }
+
+    func renameCodeFile(sessionID: UUID, name: String, newName: String) async throws -> CodeFileResult {
+        try await workerManager.call(method: "coding.rename_file", params: CodingRenameFileParams(sessionId: sessionID.uuidString, name: name, newName: newName))
+    }
+
     func loadArchitecture(sessionID: UUID) async throws -> ArchitectureStateResult {
         try await workerManager.call(method: "design.get", params: SessionIdentifierParams(sessionId: sessionID.uuidString))
     }

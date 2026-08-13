@@ -242,6 +242,31 @@ final class AppCoordinator: ObservableObject {
         try await sessionRepository.delete(id: session.id)
     }
 
+    /// Deletes every existing session and all of its data. Callers must
+    /// require a stronger confirmation than a single dialog before
+    /// calling this — see `PreviousSessionsView`'s two-step confirmation.
+    func deleteAllSessions() async {
+        let sessions = (try? await sessionRepository.fetchAll()) ?? []
+        for session in sessions {
+            try? await deleteSession(session)
+        }
+    }
+
+    /// Creates a new, not-yet-started session pre-filled from `session`'s
+    /// settings (title, type, preferences) — never its transcript,
+    /// questions, answers, or report, which belong to the original run
+    /// only. Returns the new session so the caller can navigate to it.
+    func duplicateSession(_ session: Session) async throws -> Session {
+        var copy = session
+        copy.id = UUID()
+        copy.title = session.title.isEmpty ? "Untitled Session (Copy)" : "\(session.title) (Copy)"
+        copy.status = .notStarted
+        copy.createdAt = Date()
+        copy.endedAt = nil
+        try await sessionRepository.create(copy)
+        return copy
+    }
+
     /// Registers the two hotkeys from the build prompt: show/hide overlay,
     /// compact/expand overlay. Safe to call once at launch even before a
     /// live session exists — the closures just no-op until an overlay
