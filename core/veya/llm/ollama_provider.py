@@ -71,6 +71,55 @@ class OllamaProvider:
     def __init__(self, config: Optional[OllamaConfig] = None) -> None:
         self._config = config or OllamaConfig.resolve_from_env()
 
+    async def describe_status(self) -> dict:
+        """Never raises — a diagnostic for Swift's Local AI status panel,
+        not an availability gate. Reports whether Ollama is reachable at
+        all, which model is configured, whether that exact model is
+        installed, and what *is* installed, so the app can show an
+        actionable "run `ollama pull <model>`" instead of the current
+        opaque "No local LLM was available." Loopback enforcement already
+        happened in `OllamaConfig.resolve_from_env()` — this never talks
+        to a non-loopback host either."""
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(None, self._describe_status_blocking)
+        except Exception as exc:  # noqa: BLE001 - a status check must never raise/crash the RPC
+            return {
+                "reachable": False,
+                "base_url": self._config.base_url,
+                "configured_model": self._config.model,
+                "model_installed": False,
+                "available_models": [],
+                "error": type(exc).__name__,
+            }
+
+    def _describe_status_blocking(self) -> dict:
+        request = urllib.request.Request(f"{self._config.base_url}/api/tags", method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self._config.connect_timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return {
+                "reachable": False,
+                "base_url": self._config.base_url,
+                "configured_model": self._config.model,
+                "model_installed": False,
+                "available_models": [],
+                "error": "unreachable",
+            }
+
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        names = sorted({model.get("name") for model in models if isinstance(model, dict) and model.get("name")})
+        installed = self._config.model in names or f"{self._config.model}:latest" in names
+        return {
+            "reachable": True,
+            "base_url": self._config.base_url,
+            "configured_model": self._config.model,
+            "model_installed": installed,
+            "available_models": names,
+            "error": "",
+        }
+
     async def check_availability(self) -> None:
         loop = asyncio.get_running_loop()
         try:

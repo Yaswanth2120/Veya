@@ -27,7 +27,9 @@ struct PreviousSessionsView: View {
                 ScrollView {
                     VStack(spacing: 8) {
                         ForEach(viewModel.sessions) { session in
-                            SessionDetailDisclosure(session: session)
+                            SessionDetailDisclosure(session: session) {
+                                await viewModel.delete(session, coordinator: coordinator)
+                            }
                         }
                     }
                 }
@@ -41,7 +43,10 @@ struct PreviousSessionsView: View {
 
 private struct SessionDetailDisclosure: View {
     let session: Session
+    let onDelete: () async -> Void
+
     @State private var expanded = false
+    @State private var showingDeleteConfirmation = false
     @StateObject private var detail = SessionDetailViewModel()
 
     var body: some View {
@@ -51,12 +56,12 @@ private struct SessionDetailDisclosure: View {
                     SessionReportSummaryView(report: report)
                     Divider()
                 }
-                if detail.transcript.isEmpty {
+                if detail.displayableTranscript.isEmpty {
                     Text("No transcript recorded.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(detail.transcript) { segment in
+                    ForEach(detail.displayableTranscript) { segment in
                         Text(segment.text)
                             .font(.caption)
                     }
@@ -65,12 +70,33 @@ private struct SessionDetailDisclosure: View {
             .padding(.top, 6)
             .padding(.leading, 8)
         } label: {
-            SessionRow(session: session)
+            HStack {
+                SessionRow(session: session)
+                if session.status != .live {
+                    Button(role: .destructive) {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Delete session")
+                }
+            }
         }
         .onChange(of: expanded) { _, isExpanded in
             if isExpanded {
                 Task { await detail.load(sessionID: session.id) }
             }
+        }
+        .confirmationDialog(
+            "Delete \"\(session.title.isEmpty ? "Untitled Session" : session.title)\"?",
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Permanently", role: .destructive) { Task { await onDelete() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes the transcript, report, questions/answers, documents, and any coding/design workspace for this session. This cannot be undone.")
         }
     }
 }
@@ -112,13 +138,29 @@ private struct SessionReportSummaryView: View {
 
 @MainActor
 private final class SessionDetailViewModel: ObservableObject {
-    @Published private(set) var transcript: [TranscriptSegment] = []
+    @Published private(set) var displayableTranscript: [TranscriptSegment] = []
     @Published private(set) var report: SessionReport?
     private let repository = ConversationRepository()
 
     func load(sessionID: UUID) async {
-        transcript = (try? await repository.transcript(sessionID: sessionID)) ?? []
+        let transcript = (try? await repository.transcript(sessionID: sessionID)) ?? []
+        // A review found raw whisper.cpp non-speech tags (e.g.
+        // "[BLANK_AUDIO]") visible in this history view — sessions
+        // transcribed before the source-level fix (which stops these
+        // from ever being persisted going forward) still have them
+        // stored, so this filters at display time too rather than only
+        // fixing new data.
+        displayableTranscript = transcript.filter { !Self.isNonSpeechMarker($0.text) }
         report = try? await repository.report(sessionID: sessionID)
+    }
+
+    private static func isNonSpeechMarker(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first, let last = trimmed.last else { return true }
+        let isBracketed = (first == "[" && last == "]") || (first == "(" && last == ")")
+        guard isBracketed else { return false }
+        let inner = trimmed.dropFirst().dropLast()
+        return !inner.contains("[") && !inner.contains("]") && !inner.contains("(") && !inner.contains(")")
     }
 }
 
@@ -129,5 +171,10 @@ final class PreviousSessionsViewModel: ObservableObject {
 
     func load() async {
         sessions = (try? await repository.fetchAll()) ?? []
+    }
+
+    func delete(_ session: Session, coordinator: AppCoordinator) async {
+        try? await coordinator.deleteSession(session)
+        await load()
     }
 }

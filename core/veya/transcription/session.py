@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from typing import Awaitable, Callable, Optional
 
@@ -28,6 +29,18 @@ from ..ipc.errors import ErrorCode, ProtocolError
 logger = logging.getLogger("veya.transcription")
 
 EmitEvent = Callable[[str, dict], Awaitable[None]]
+
+# whisper.cpp emits a bracketed/parenthesized tag instead of real words for
+# a non-speech window — "[BLANK_AUDIO]", "(silence)", "[SILENCE]",
+# "[ Music ]", etc. These are never real transcript content and must never
+# reach Swift/the user-facing history as if they were — matched only when
+# the *entire* stripped text is one such tag, so a real sentence that
+# merely contains a bracketed aside is never dropped.
+_NON_SPEECH_MARKER = re.compile(r"^[\[\(][^\]\)]*[\]\)]$")
+
+
+def _is_non_speech_marker(text: str) -> bool:
+    return bool(_NON_SPEECH_MARKER.fullmatch(text.strip()))
 
 
 class TranscriptionSession:
@@ -102,7 +115,7 @@ class TranscriptionSession:
     async def _transcribe_and_emit(self, window: bytes, started_at: float, duration: float) -> None:
         raw_text = await self._run_blocking(lambda: self._engine.transcribe_pcm(window, self._buffer.sample_rate_hz))
         text = raw_text.strip()
-        if not text:
+        if not text or _is_non_speech_marker(text):
             return
 
         deduped = dedupe_overlap(self._previous_text, text)

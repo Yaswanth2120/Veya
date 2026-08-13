@@ -229,6 +229,36 @@ async def _handle_info(params: dict, context: WorkerContext) -> dict:
     }
 
 
+async def _handle_system_llm_status(params: dict, context: WorkerContext) -> dict:
+    try:
+        provider = context.llm_provider_factory()
+    except Exception as exc:  # noqa: BLE001 - e.g. a rejected non-loopback VEYA_OLLAMA_URL; report, never raise
+        return {"reachable": False, "base_url": "", "configured_model": "", "model_installed": False, "available_models": [], "error": type(exc).__name__}
+    describe = getattr(provider, "describe_status", None)
+    if describe is None:
+        # A test/fake `llm_provider_factory` that doesn't implement this —
+        # never a crash, just "we don't know."
+        return {"reachable": False, "base_url": "", "configured_model": "", "model_installed": False, "available_models": [], "error": "unsupported"}
+    return await describe()
+
+
+async def _handle_session_delete_data(params: dict, context: WorkerContext) -> dict:
+    """Cleans up every piece of Python-owned derived data for a session
+    that's being deleted from Swift/GRDB — the coding workspace,
+    architecture state, knowledge-index documents/chunks, never-approved
+    memory candidates, and the cached session report. Approved memory is
+    deliberately untouched (see `MemoryStore.delete_proposed_for_session`)
+    — it's meant to outlive the session it came from. Idempotent: deleting
+    data for a session with nothing stored is not an error."""
+    session_id = _code_session_id(params)
+    _get_or_create_code_workspace_store(context).delete_session(session_id)
+    _get_or_create_architecture_store(context).delete_session(session_id)
+    _get_or_create_vector_store(context).remove_session(session_id)
+    _get_or_create_memory_store(context).delete_proposed_for_session(session_id)
+    _get_or_create_report_store(context).delete(session_id)
+    return {"ok": True}
+
+
 async def _handle_shutdown(params: dict, context: WorkerContext) -> dict:
     await context.cancel_feed_task_if_running()
     await context.close_transcription_session_if_running()
@@ -763,6 +793,8 @@ async def _handle_memory_delete(params: dict, context: WorkerContext) -> dict:
 _HANDLERS: dict[str, Handler] = {
     "system.ping": _handle_ping,
     "system.info": _handle_info,
+    "system.llm_status": _handle_system_llm_status,
+    "session.delete_data": _handle_session_delete_data,
     "worker.shutdown": _handle_shutdown,
     "session.start": _handle_session_start,
     "session.stop": _handle_session_stop,

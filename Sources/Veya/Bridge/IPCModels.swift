@@ -334,6 +334,18 @@ struct SystemInfoResult: Decodable, Sendable {
     let pid: Int
 }
 
+/// `system.llm_status`'s result — a diagnostic for the Local AI status
+/// panel (Settings), never a gate on whether a real RPC is attempted.
+/// `error` is a short, typed reason string, never a raw exception message.
+struct LLMStatusResult: Decodable, Sendable {
+    let reachable: Bool
+    let baseUrl: String
+    let configuredModel: String
+    let modelInstalled: Bool
+    let availableModels: [String]
+    let error: String
+}
+
 // MARK: - Event payloads (mirror core/veya/ipc/events.py field-for-field)
 
 struct WorkerReadyEventData: Decodable, Sendable {

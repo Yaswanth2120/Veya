@@ -157,6 +157,9 @@ final class PythonWorkerManager: ObservableObject {
         if environment["VEYA_WHISPER_MODEL"] == nil, let whisperModelPathURL = configuration.whisperModelPathURL {
             environment["VEYA_WHISPER_MODEL"] = whisperModelPathURL.path
         }
+        if environment["VEYA_OLLAMA_MODEL"] == nil, let ollamaModelOverride = configuration.ollamaModelOverride, !ollamaModelOverride.isEmpty {
+            environment["VEYA_OLLAMA_MODEL"] = ollamaModelOverride
+        }
         process.environment = environment
 
         let stdinPipe = Pipe()

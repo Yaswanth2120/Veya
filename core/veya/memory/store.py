@@ -95,6 +95,15 @@ class MemoryStore:
             raise ProtocolError(ErrorCode.SESSION_NOT_FOUND, "No memory with that id exists.")
         return self._get(memory_id)
 
+    def delete_proposed_for_session(self, session_id: str) -> None:
+        """Deleting a session cleans up its never-approved candidates —
+        they're meaningless without the session data they were proposed
+        from. Approved memory is deliberately left untouched: the whole
+        point of durable memory is that it outlives the session it was
+        first observed in and keeps being used in future ones."""
+        self._connection.execute("DELETE FROM memory WHERE session_id = ? AND status = ?", (session_id, STATUS_PROPOSED))
+        self._connection.commit()
+
     def delete(self, memory_id: str) -> None:
         cursor = self._connection.execute("DELETE FROM memory WHERE id = ?", (memory_id,))
         self._connection.commit()

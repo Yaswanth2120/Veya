@@ -45,6 +45,13 @@ struct PythonWorkerConfiguration: Sendable {
     /// `PythonWorkerManager.launchProcessAndWaitForReady`).
     var whisperBinaryPathURL: URL?
     var whisperModelPathURL: URL?
+    /// User-chosen override for `VEYA_OLLAMA_MODEL` (Settings → Local AI),
+    /// persisted via `LocalAIPreferencesStore`. `nil`/empty means no
+    /// override — the worker falls back to its own default or an
+    /// explicit `VEYA_OLLAMA_MODEL` already in the inherited environment,
+    /// which always wins over this (see
+    /// `PythonWorkerManager.launchProcessAndWaitForReady`).
+    var ollamaModelOverride: String?
 
     var rpcTimeout: TimeInterval = 5
     var readyTimeout: TimeInterval = 10

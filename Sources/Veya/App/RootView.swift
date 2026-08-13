@@ -31,6 +31,8 @@ struct RootView: View {
                 PresenterPrivacySettingsView(privacyManager: coordinator.presenterPrivacyManager)
             case .memory:
                 MemoryReviewView()
+            case .localAIStatus:
+                LocalAIStatusView()
             }
         }
         .confirmationDialog(

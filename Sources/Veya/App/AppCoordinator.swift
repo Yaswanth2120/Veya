@@ -17,6 +17,7 @@ final class AppCoordinator: ObservableObject {
         case settings
         case presenterPrivacy
         case memory
+        case localAIStatus
     }
 
     @Published var route: Route = .dashboard
@@ -42,15 +43,18 @@ final class AppCoordinator: ObservableObject {
 
     private let sessionRepository: SessionRepository
     private let conversationRepository: ConversationRepository
+    private let sessionDocumentRepository: SessionDocumentRepository
 
     init(
         sessionRepository: SessionRepository = SessionRepository(),
         conversationRepository: ConversationRepository = ConversationRepository(),
+        sessionDocumentRepository: SessionDocumentRepository = SessionDocumentRepository(),
         presenterPrivacyManager: PresenterPrivacyManager = PresenterPrivacyManager(),
         pythonIntelligenceCoordinator: PythonIntelligenceCoordinator = PythonIntelligenceCoordinator()
     ) {
         self.sessionRepository = sessionRepository
         self.conversationRepository = conversationRepository
+        self.sessionDocumentRepository = sessionDocumentRepository
         self.presenterPrivacyManager = presenterPrivacyManager
         self.pythonIntelligenceCoordinator = pythonIntelligenceCoordinator
         presenterPrivacyManager.setOverlayWindowProvider { [weak self] in
@@ -211,6 +215,31 @@ final class AppCoordinator: ObservableObject {
             preparationGaps: result.preparationGaps, generatedAt: Date()
         )
         try? await conversationRepository.save(report)
+    }
+
+    /// Permanently deletes `session` and every piece of data associated
+    /// with it: on-disk document copies, the Python-owned coding
+    /// workspace/architecture state/knowledge-index entries/never-approved
+    /// memory candidates/cached report (best-effort — a worker that isn't
+    /// running just leaves that derived data orphaned on disk, which is
+    /// harmless and never blocks the deletion itself), and finally the
+    /// GRDB `Session` row, which cascades (`ON DELETE CASCADE`) to every
+    /// `TranscriptSegment`/`DetectedQuestion`/`CopilotAnswer`/
+    /// `SessionDocument`/`SessionReport` row for it. Never call this for
+    /// the currently *live* session — callers must end it first.
+    func deleteSession(_ session: Session) async throws {
+        if pythonIntelligenceCoordinator.workerManager.state == .ready || pythonIntelligenceCoordinator.workerManager.state == .unhealthy {
+            let _: OkResult? = try? await pythonIntelligenceCoordinator.workerManager.call(
+                method: "session.delete_data", params: SessionIdentifierParams(sessionId: session.id.uuidString)
+            )
+        }
+
+        let documents = (try? await sessionDocumentRepository.fetchAll(sessionID: session.id)) ?? []
+        for document in documents {
+            try? FileManager.default.removeItem(atPath: document.storedPath)
+        }
+
+        try await sessionRepository.delete(id: session.id)
     }
 
     /// Registers the two hotkeys from the build prompt: show/hide overlay,

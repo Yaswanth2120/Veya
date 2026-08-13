@@ -106,6 +106,47 @@ class TranscriptionSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(emitter.events, [])
 
+    async def test_non_speech_markers_emit_no_event_and_never_reach_swift(self):
+        # whisper.cpp emits a bracketed tag instead of real words for
+        # silent/non-speech windows — these must never surface in
+        # Swift/the user-facing history as if they were real transcript
+        # content (a review finding: raw "[BLANK_AUDIO]" markers were
+        # visible in Previous Sessions).
+        for marker in ("[BLANK_AUDIO]", "(silence)", "[SILENCE]", "[ Music ]", "[ Applause ]"):
+            with self.subTest(marker=marker):
+                engine = FakeEngine([marker])
+                emitter = RecordingEmitter()
+                session = TranscriptionSession(
+                    session_id="s1",
+                    sample_rate_hz=100,
+                    engine=engine,
+                    emit_event=emitter,
+                    run_blocking=immediate_run_blocking,
+                )
+                await session.handle_chunk(0, 0.0, 4.0, make_pcm(800))
+                await session.close()
+
+                self.assertEqual(emitter.events, [])
+
+    async def test_a_sentence_containing_a_bracketed_aside_is_not_treated_as_a_marker(self):
+        # Only a window whose *entire* text is one bracketed/parenthesized
+        # tag is filtered — real speech that happens to include a
+        # parenthetical must still come through untouched.
+        engine = FakeEngine(["the migration took six weeks (roughly)"])
+        emitter = RecordingEmitter()
+        session = TranscriptionSession(
+            session_id="s1",
+            sample_rate_hz=100,
+            engine=engine,
+            emit_event=emitter,
+            run_blocking=immediate_run_blocking,
+        )
+        await session.handle_chunk(0, 0.0, 4.0, make_pcm(800))
+        await session.close()
+
+        self.assertEqual(len(emitter.events), 1)
+        self.assertEqual(emitter.events[0][1]["text"], "the migration took six weeks (roughly)")
+
     async def test_overlapping_window_text_is_deduplicated_across_events(self):
         engine = FakeEngine(["we moved the auth service first", "auth service first since everything depended"])
         emitter = RecordingEmitter()

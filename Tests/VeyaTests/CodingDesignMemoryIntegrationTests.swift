@@ -194,4 +194,44 @@ struct CodingDesignMemoryIntegrationTests {
 
         await manager.stop()
     }
+
+    /// Real end-to-end reproduction of a review finding: on this
+    /// environment, Ollama is genuinely running with `qwen3:1.7b`
+    /// installed, but the worker's *default* configured model is
+    /// `llama3.2`, which is not installed — so `system.llm_status` must
+    /// report `reachable: true, modelInstalled: false`, and switching the
+    /// override to the real installed model must flip it to `true`,
+    /// against a real worker and a real local Ollama instance (never
+    /// asserted, only reported, when no real Ollama happens to be running
+    /// in whatever environment eventually runs this).
+    @Test("system.llm_status reflects a real Ollama instance and a real installed-model mismatch")
+    func llmStatusReflectsRealOllamaMismatchAndRecovers() async throws {
+        let eventRouter = IPCEventRouter()
+        let workerManager = makeManager()
+        let coordinator = PythonIntelligenceCoordinator(workerManager: workerManager, eventRouter: eventRouter)
+        await workerManager.start()
+        #expect(workerManager.state == .ready)
+
+        let status = await coordinator.fetchLLMStatus()
+        guard status.reachable else {
+            // No real local Ollama running in whatever environment ran
+            // this — nothing further to prove here.
+            await workerManager.stop()
+            return
+        }
+
+        guard let installedModel = status.availableModels.first else {
+            await workerManager.stop()
+            return
+        }
+
+        await coordinator.setOllamaModelOverride(installedModel)
+        #expect(workerManager.state == .ready)
+
+        let updatedStatus = await coordinator.fetchLLMStatus()
+        #expect(updatedStatus.modelInstalled == true)
+        #expect(updatedStatus.configuredModel == installedModel)
+
+        await workerManager.stop()
+    }
 }

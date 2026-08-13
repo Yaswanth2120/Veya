@@ -98,6 +98,13 @@ class CodeWorkspaceStore:
         self._save(session_id, files)
         return file
 
+    def delete_session(self, session_id: str) -> None:
+        path = self._path(session_id)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ProtocolError(ErrorCode.INTERNAL_ERROR, "The local code workspace could not be deleted.") from exc
+
     def _path(self, session_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", session_id):
             raise ProtocolError(ErrorCode.INVALID_PARAMS, "Invalid workspace session id.")

@@ -49,6 +49,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     private let audioCapture: AudioCapturing?
     private let microphonePermission: MicrophonePermissionChecking
     private let whisperModelManager: WhisperModelManager
+    private let localAIPreferencesStore: LocalAIPreferencesStore
     /// Published so the first-launch download (Section 13's packaging
     /// build prompt) can show real progress instead of the app silently
     /// sitting on "Listening" with no explanation for however long a
@@ -75,13 +76,15 @@ final class PythonIntelligenceCoordinator: ObservableObject {
         eventRouter: IPCEventRouter = IPCEventRouter(),
         audioCapture: AudioCapturing? = nil,
         microphonePermission: MicrophonePermissionChecking = AVFoundationMicrophonePermission(),
-        whisperModelManager: WhisperModelManager = WhisperModelManager()
+        whisperModelManager: WhisperModelManager = WhisperModelManager(),
+        localAIPreferencesStore: LocalAIPreferencesStore = LocalAIPreferencesStore()
     ) {
         self.workerManager = workerManager
         self.eventRouter = eventRouter
         self.audioCapture = audioCapture
         self.microphonePermission = microphonePermission
         self.whisperModelManager = whisperModelManager
+        self.localAIPreferencesStore = localAIPreferencesStore
         self.microphoneAuthorizationState = microphonePermission.currentStatus
         workerManager.eventHandler = { [weak eventRouter] event in
             await eventRouter?.route(event)
@@ -100,10 +103,41 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// worker launch already has real transcription configured whenever
     /// possible, not only after a later restart.
     func launchWorkerInBackground() {
+        let storedModel = localAIPreferencesStore.load().ollamaModel
+        if !storedModel.isEmpty {
+            workerManager.configuration.ollamaModelOverride = storedModel
+        }
         Task {
             await prepareRealTranscriptionAssets()
             await workerManager.start()
         }
+    }
+
+    /// Real, un-mocked Ollama diagnostics for the Local AI status panel
+    /// (Settings) — reachability, the currently configured model, whether
+    /// that exact model is actually installed, and what is. Never throws;
+    /// a worker that isn't `.ready` yet reports fully unreachable rather
+    /// than blocking/erroring.
+    func fetchLLMStatus() async -> LLMStatusResult {
+        guard workerManager.state == .ready || workerManager.state == .unhealthy else {
+            return LLMStatusResult(reachable: false, baseUrl: "", configuredModel: "", modelInstalled: false, availableModels: [], error: "worker_not_ready")
+        }
+        do {
+            return try await workerManager.call(method: "system.llm_status", params: EmptyIPCParams())
+        } catch {
+            return LLMStatusResult(reachable: false, baseUrl: "", configuredModel: "", modelInstalled: false, availableModels: [], error: String(reflecting: type(of: error)))
+        }
+    }
+
+    /// Persists `model` as the user's chosen Ollama model (Settings →
+    /// Local AI) and restarts the worker so it takes effect immediately,
+    /// rather than only on the next app launch. An empty string clears
+    /// the override, reverting to the worker's own default.
+    func setOllamaModelOverride(_ model: String) async {
+        localAIPreferencesStore.save(LocalAIPreferences(ollamaModel: model))
+        workerManager.configuration.ollamaModelOverride = model.isEmpty ? nil : model
+        await workerManager.stop()
+        await workerManager.start()
     }
 
     /// Resolves a local `whisper-cli` binary and ensures the manifest's

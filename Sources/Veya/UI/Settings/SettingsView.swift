@@ -31,6 +31,12 @@ struct SettingsView: View {
                         coordinator.route = .memory
                     }
                 }
+
+                Section("Local AI") {
+                    Button("Status & Model…") {
+                        coordinator.route = .localAIStatus
+                    }
+                }
             }
             .formStyle(.grouped)
 

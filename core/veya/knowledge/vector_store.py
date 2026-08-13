@@ -142,6 +142,13 @@ class VectorStore:
         self._connection.execute("DELETE FROM documents WHERE document_id = ?", (document_id,))
         self._connection.commit()
 
+    def remove_session(self, session_id: str) -> None:
+        """Removes every document (and, via `ON DELETE CASCADE`, every
+        chunk) ingested for `session_id` — the knowledge-index half of
+        deleting a session's data entirely."""
+        self._connection.execute("DELETE FROM documents WHERE session_id = ?", (session_id,))
+        self._connection.commit()
+
     def search(self, session_id: str, query_embedding: List[float], top_k: int) -> List[Tuple[DocumentChunk, float]]:
         """Session-scoped only — never retrieves chunks belonging to a
         different session, and only from documents whose status is

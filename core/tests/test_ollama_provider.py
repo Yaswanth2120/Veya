@@ -113,6 +113,48 @@ class CheckAvailabilityTests(unittest.IsolatedAsyncioTestCase):
                 await provider.check_availability()
 
 
+class DescribeStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reachable_with_configured_model_installed(self):
+        provider = OllamaProvider(OllamaConfig(base_url="http://localhost:11434", model="qwen3:1.7b"))
+        response = FakeHTTPResponse(body=json.dumps({"models": [{"name": "qwen3:1.7b"}, {"name": "nomic-embed-text:latest"}]}).encode("utf-8"))
+        with patch("veya.llm.ollama_provider.urllib.request.urlopen", return_value=response):
+            status = await provider.describe_status()
+        self.assertTrue(status["reachable"])
+        self.assertTrue(status["model_installed"])
+        self.assertEqual(status["configured_model"], "qwen3:1.7b")
+        self.assertIn("nomic-embed-text:latest", status["available_models"])
+
+    async def test_reachable_but_configured_model_missing(self):
+        # Exactly the scenario a review found live: Ollama running,
+        # llama3.2 configured, only qwen3:1.7b actually installed.
+        provider = OllamaProvider(OllamaConfig(base_url="http://localhost:11434", model="llama3.2"))
+        response = FakeHTTPResponse(body=json.dumps({"models": [{"name": "qwen3:1.7b"}]}).encode("utf-8"))
+        with patch("veya.llm.ollama_provider.urllib.request.urlopen", return_value=response):
+            status = await provider.describe_status()
+        self.assertTrue(status["reachable"])
+        self.assertFalse(status["model_installed"])
+        self.assertEqual(status["configured_model"], "llama3.2")
+        self.assertEqual(status["available_models"], ["qwen3:1.7b"])
+
+    async def test_unreachable_never_raises(self):
+        provider = OllamaProvider(OllamaConfig(base_url="http://localhost:1", model="m"))
+        with patch(
+            "veya.llm.ollama_provider.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("connection refused"),
+        ):
+            status = await provider.describe_status()
+        self.assertFalse(status["reachable"])
+        self.assertFalse(status["model_installed"])
+        self.assertEqual(status["available_models"], [])
+
+    async def test_malformed_response_never_raises(self):
+        provider = OllamaProvider(OllamaConfig(base_url="http://localhost:11434", model="m"))
+        response = FakeHTTPResponse(body=b"not json")
+        with patch("veya.llm.ollama_provider.urllib.request.urlopen", return_value=response):
+            status = await provider.describe_status()
+        self.assertFalse(status["reachable"])
+
+
 class GenerateStreamTests(unittest.IsolatedAsyncioTestCase):
     async def test_yields_response_deltas_in_order(self):
         provider = OllamaProvider(OllamaConfig(base_url="http://localhost:11434", model="m"))

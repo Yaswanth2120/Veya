@@ -121,6 +121,25 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sensitive internal detail", logged_text)
         self.assertIn("ValueError", logged_text)
 
+    async def test_llm_status_reports_provider_status_without_raising(self):
+        class FakeProvider:
+            async def describe_status(self):
+                return {"reachable": True, "base_url": "http://localhost:11434", "configured_model": "llama3.2", "model_installed": False, "available_models": ["qwen3:1.7b"], "error": ""}
+
+        context = WorkerContext(emit_event=RecordingEmitter(), llm_provider_factory=FakeProvider)
+        result = await Dispatcher().dispatch(Request(id="1", method="system.llm_status", params={}), context)
+        self.assertTrue(result["reachable"])
+        self.assertFalse(result["model_installed"])
+        self.assertEqual(result["configured_model"], "llama3.2")
+
+    async def test_llm_status_never_raises_when_provider_construction_fails(self):
+        def failing_factory():
+            raise RuntimeError("VEYA_OLLAMA_URL must point at a local host")
+
+        context = WorkerContext(emit_event=RecordingEmitter(), llm_provider_factory=failing_factory)
+        result = await Dispatcher().dispatch(Request(id="1", method="system.llm_status", params={}), context)
+        self.assertFalse(result["reachable"])
+
     async def test_session_stop_cancels_running_feed(self):
         context, _ = make_context()
         dispatcher = Dispatcher()
