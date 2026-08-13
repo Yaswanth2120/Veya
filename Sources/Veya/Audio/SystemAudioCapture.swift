@@ -31,7 +31,7 @@ enum SystemAudioSource: Sendable, Equatable {
     case allSystemAudio
 }
 
-struct SelectableAudioApplication: Sendable, Equatable, Identifiable {
+struct SelectableAudioApplication: Sendable, Equatable, Hashable, Identifiable {
     let processID: pid_t
     let bundleIdentifier: String
     let displayName: String

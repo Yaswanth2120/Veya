@@ -186,6 +186,21 @@ class WorkerContext:
             self.conversation_orchestrator = None
             await orchestrator.close()
 
+    def close(self) -> None:
+        """Closes every lazily-created SQLite-backed store this context
+        ever opened (`memory_store`/`vector_store`) — real, held-open
+        connections (`check_same_thread=False`), not something GC can be
+        relied on to close promptly. The real worker process only ever
+        constructs one `WorkerContext` for its whole lifetime and exits
+        the process on shutdown (closing the fd anyway), so this matters
+        far more for tests, which construct many short-lived contexts."""
+        if self.memory_store is not None:
+            self.memory_store.close()
+            self.memory_store = None
+        if self.vector_store is not None:
+            self.vector_store.close()
+            self.vector_store = None
+
 
 def _get_or_create_vector_store(context: WorkerContext) -> VectorStore:
     if context.vector_store is None:

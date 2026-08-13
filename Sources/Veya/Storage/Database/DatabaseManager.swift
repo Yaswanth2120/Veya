@@ -202,6 +202,18 @@ final class DatabaseManager: Sendable {
             }
         }
 
+        migrator.registerMigration("v8_addDocumentKindToSessionDocument") { db in
+            // Section 16: "resume"/"jobDescription"/"other" — lets the
+            // Interview Copilot flow require a resume specifically (not
+            // just "some document") before starting, and lets retrieval
+            // eventually weight resume/JD content differently. Existing
+            // rows default to "other", matching their prior untyped
+            // treatment exactly.
+            try db.alter(table: SessionDocument.databaseTableName) { t in
+                t.add(column: "documentKind", .text).notNull().defaults(to: DocumentKind.other.rawValue)
+            }
+        }
+
         try migrator.migrate(dbWriter)
     }
 }

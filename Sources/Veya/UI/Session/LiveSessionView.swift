@@ -302,6 +302,27 @@ struct LiveSessionView: View {
         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
     }
 
+    /// Section 16: the mixed/microphone-only mode "I'm answering"
+    /// fallback control — a visible toggle alongside the ⌘⇧A hotkey,
+    /// with an explicit disclosure that automatic speaker identity isn't
+    /// reliable outside separated-track mode.
+    private var imAnsweringControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(isOn: Binding(
+                get: { pythonIntelligenceCoordinator.isUserSpeaking },
+                set: { newValue in Task { await pythonIntelligenceCoordinator.setUserSpeaking(newValue) } }
+            )) {
+                Text("I'm answering").font(.caption.bold())
+            }
+            .toggleStyle(.switch)
+            Text("Hotkey: ⌘⇧A. Hold this on while you speak so your own voice isn't mistaken for an interviewer question — automatic speaker identity isn't reliable without separated meeting audio.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+    }
+
     private func transcriptLaneLabel(for segment: TranscriptSegment) -> String? {
         switch segment.speakerRole {
         case SpeakerRole.interviewer.rawValue: return "INTERVIEWER"
@@ -312,6 +333,11 @@ struct LiveSessionView: View {
 
     private var sidePanel: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if pythonIntelligenceCoordinator.drivingSource == .realTranscription {
+                MeetingAudioControlView(pythonIntelligenceCoordinator: pythonIntelligenceCoordinator)
+                imAnsweringControl
+            }
+
             VStack(alignment: .leading, spacing: 6) {
                 Text("DETECTED QUESTIONS")
                     .font(.caption.bold())

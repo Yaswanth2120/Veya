@@ -43,6 +43,13 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// flow either way (see the type doc comment's fallback order);
     /// this only affects whether questions get answered.
     @Published private(set) var answerIntelligenceAvailable = false
+    /// The mixed/microphone-only mode "I'm answering" hold-to-talk/toggle
+    /// state (Section 16) — `true` while the user's own mixed-track
+    /// speech should be treated as authoritative answer context instead
+    /// of a candidate/draft trigger. Always `false` in separated-track
+    /// mode, where the microphone track is already reliably known to be
+    /// the user regardless of this flag.
+    @Published private(set) var isUserSpeaking = false
 
     let workerManager: PythonWorkerManager
     private let eventRouter: IPCEventRouter
@@ -505,6 +512,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
             activeConversationState = nil
             drivingSource = .swiftFallback
             answerIntelligenceAvailable = false
+            isUserSpeaking = false
             state.switchToSwiftFallback()
         case .starting, .ready, .unhealthy:
             break
@@ -521,6 +529,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
             activeConversationState = nil
             drivingSource = .none
             answerIntelligenceAvailable = false
+            isUserSpeaking = false
         }
 
         guard activeSessionID == sessionID else { return }
@@ -657,10 +666,20 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// A harmless no-op if no real-transcription session is active.
     func setUserSpeaking(_ active: Bool) async {
         guard let sessionID = activeSessionID, drivingSource == .realTranscription else { return }
+        isUserSpeaking = active
         let _: OkResult? = try? await workerManager.call(
             method: "conversation.set_user_speaking",
             params: SetUserSpeakingParams(sessionId: sessionID.uuidString, active: active)
         )
+    }
+
+    /// The "I'm answering" hotkey/button's action — flips the current
+    /// state. A plain toggle (not true hold-to-talk, which would need a
+    /// paired key-down/key-up hotkey pair `GlobalHotkeyManager` doesn't
+    /// support) — press once when starting to answer, press again when
+    /// finished.
+    func toggleUserSpeaking() async {
+        await setUserSpeaking(!isUserSpeaking)
     }
 
     /// The single, non-technical string `LiveSessionView` shows — the only

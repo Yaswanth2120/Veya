@@ -278,5 +278,14 @@ final class AppCoordinator: ObservableObject {
         hotkeyManager.register(keyCode: UInt32(kVK_ANSI_C), modifiers: UInt32(cmdKey | shiftKey)) { [weak self] in
             self?.overlayWindowController?.toggleCompactMode()
         }
+        // Section 16: mixed/microphone-only mode's "I'm answering"
+        // fallback control — toggles whether the user's own speech is
+        // treated as authoritative answer context instead of a
+        // candidate/draft trigger. A harmless no-op outside an active
+        // real-transcription session (see `setUserSpeaking`).
+        hotkeyManager.register(keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(cmdKey | shiftKey)) { [weak self] in
+            guard let self else { return }
+            Task { await self.pythonIntelligenceCoordinator.toggleUserSpeaking() }
+        }
     }
 }

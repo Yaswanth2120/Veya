@@ -51,7 +51,7 @@ struct RootView: View {
         case .dashboard:
             DashboardView()
         case .createSession:
-            CreateSessionView()
+            CreateSessionView(pythonIntelligenceCoordinator: coordinator.pythonIntelligenceCoordinator)
         case .liveSession:
             if let state = coordinator.conversationState {
                 LiveSessionView(

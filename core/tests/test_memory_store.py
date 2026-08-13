@@ -17,6 +17,7 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             db_path = Path(temporary) / "memory.sqlite"
             store = MemoryStore(db_path)
+            self.addCleanup(store.close)
             candidate = store.create_candidate("s-1", "Prefers concise answers")
             self.assertEqual(candidate.status, STATUS_PROPOSED)
             self.assertEqual(store.approved_texts(), [])
@@ -28,11 +29,13 @@ class MemoryStoreTests(unittest.TestCase):
             # Simulates an app restart: a brand new `MemoryStore` opened
             # against the same file must see the same durable state.
             reopened = MemoryStore(db_path)
+            self.addCleanup(reopened.close)
             self.assertEqual(reopened.approved_texts(), ["Prefers concise answers"])
 
     def test_rejected_candidate_is_never_retrievable(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = MemoryStore(Path(temporary) / "memory.sqlite")
+            self.addCleanup(store.close)
             candidate = store.create_candidate("s-1", "some inferred fact")
             store.reject(candidate.id)
             self.assertEqual(store.approved_texts(), [])
@@ -41,6 +44,7 @@ class MemoryStoreTests(unittest.TestCase):
     def test_update_and_delete_persist(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = MemoryStore(Path(temporary) / "memory.sqlite")
+            self.addCleanup(store.close)
             candidate = store.create_candidate("s-1", "original text")
             store.approve(candidate.id)
             store.update(candidate.id, "updated text")
@@ -51,6 +55,7 @@ class MemoryStoreTests(unittest.TestCase):
     def test_operating_on_a_missing_memory_id_raises(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = MemoryStore(Path(temporary) / "memory.sqlite")
+            self.addCleanup(store.close)
             with self.assertRaises(ProtocolError):
                 store.approve("does-not-exist")
             with self.assertRaises(ProtocolError):
@@ -66,6 +71,7 @@ class MemoryDispatcherTests(unittest.IsolatedAsyncioTestCase):
             # Seed a candidate the way `session.analyze` would.
             from veya.ipc.dispatcher import _get_or_create_memory_store
             candidate = _get_or_create_memory_store(context).create_candidate("s-1", "Works on the payments team")
+            self.addCleanup(context.memory_store.close)
 
             approved = await dispatcher.dispatch(Request(id="1", method="memory.approve", params={"memory_id": candidate.id}), context)
             self.assertEqual(approved["status"], "APPROVED")
@@ -85,6 +91,7 @@ class MemoryDispatcherTests(unittest.IsolatedAsyncioTestCase):
             from veya.ipc.dispatcher import _get_or_create_memory_store
             context = WorkerContext(emit_event=_ignore_event, memory_database_path=Path(temporary) / "memory.sqlite")
             candidate = _get_or_create_memory_store(context).create_candidate("s-1", "Prefers concise answers")
+            self.addCleanup(context.memory_store.close)
             _get_or_create_memory_store(context).approve(candidate.id)
 
             from veya.conversation.context_builder import render_prompt

@@ -4,11 +4,41 @@ import UniformTypeIdentifiers
 struct CreateSessionView: View {
     @EnvironmentObject private var coordinator: AppCoordinator
     @StateObject private var viewModel = CreateSessionViewModel()
+    @ObservedObject private var pythonIntelligenceCoordinator: PythonIntelligenceCoordinator
+    @ObservedObject private var knowledgeIngestionTracker: KnowledgeIngestionTracker
+
+    /// Non-nil once `save()` has succeeded for an Interview Copilot
+    /// session with attached documents — the view switches from the
+    /// create form to the "waiting for documents to index" gate.
+    @State private var pendingInterviewSession: Session?
+
+    init(pythonIntelligenceCoordinator: PythonIntelligenceCoordinator) {
+        self.pythonIntelligenceCoordinator = pythonIntelligenceCoordinator
+        self.knowledgeIngestionTracker = pythonIntelligenceCoordinator.knowledgeIngestionTracker
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             BackToDashboardButton()
 
+            if let pendingInterviewSession {
+                interviewReadinessGate(for: pendingInterviewSession)
+            } else {
+                createForm
+            }
+        }
+        .padding(28)
+        .fileImporter(
+            isPresented: $viewModel.isFileImporterPresented,
+            allowedContentTypes: [.pdf, .plainText, .sourceCode, UTType(filenameExtension: "docx") ?? .data, UTType(filenameExtension: "md") ?? .plainText],
+            allowsMultipleSelection: true
+        ) { result in
+            viewModel.handleFileImport(result)
+        }
+    }
+
+    private var createForm: some View {
+        VStack(alignment: .leading, spacing: 16) {
             Text("Create Session")
                 .font(.largeTitle.bold())
 
@@ -87,11 +117,30 @@ struct CreateSessionView: View {
                                     Image(systemName: "doc.fill")
                                     Text(document.fileName)
                                     Spacer()
+                                    if isInterviewSession {
+                                        Picker("Kind", selection: Binding(
+                                            get: { document.kind },
+                                            set: { viewModel.setDocumentKind($0, forFileNamed: document.fileName) }
+                                        )) {
+                                            ForEach(DocumentKind.allCases) { kind in
+                                                Text(kind.displayName).tag(kind)
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .frame(width: 140)
+                                    }
                                     Text(ByteCountFormatter.string(fromByteCount: document.fileSizeBytes, countStyle: .file))
                                         .foregroundStyle(.secondary)
                                         .font(.caption)
                                 }
                             }
+                        }
+                        if isInterviewSession {
+                            Text("A resume is required before starting an Interview Copilot session, unless you explicitly start without one.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Toggle("Start without resume", isOn: $viewModel.startWithoutResume)
+                                .font(.caption)
                         }
                     }
                 }
@@ -105,28 +154,98 @@ struct CreateSessionView: View {
                         .font(.caption)
                 }
                 Spacer()
-                Button("Create & Start Session") {
-                    Task {
-                        if let session = await viewModel.save() {
-                            coordinator.pythonIntelligenceCoordinator.ingestDocuments(
-                                session: session, documents: viewModel.lastCreatedDocuments
-                            )
-                            coordinator.requestStartLiveSession(for: session)
-                        }
-                    }
+                Button(isInterviewSession ? "Create Session" : "Create & Start Session") {
+                    Task { await createAndProceed() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(viewModel.title.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(!canCreate)
             }
         }
-        .padding(28)
-        .fileImporter(
-            isPresented: $viewModel.isFileImporterPresented,
-            allowedContentTypes: [.pdf, .plainText, .sourceCode, UTType(filenameExtension: "docx") ?? .data, UTType(filenameExtension: "md") ?? .plainText],
-            allowsMultipleSelection: true
-        ) { result in
-            viewModel.handleFileImport(result)
+    }
+
+    private var canCreate: Bool {
+        guard !viewModel.title.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        if isInterviewSession, !viewModel.hasResumeDocument, !viewModel.startWithoutResume { return false }
+        return true
+    }
+
+    private func createAndProceed() async {
+        guard let session = await viewModel.save() else { return }
+        pythonIntelligenceCoordinator.ingestDocuments(session: session, documents: viewModel.lastCreatedDocuments)
+
+        if isInterviewSession, !viewModel.lastCreatedDocuments.isEmpty {
+            // Gate on real indexing readiness before the interview
+            // actually starts — see `interviewReadinessGate`.
+            pendingInterviewSession = session
+        } else {
+            coordinator.requestStartLiveSession(for: session)
         }
+    }
+
+    /// Section 16: "Resume ready for interview / Job description ready /
+    /// Interview context ready" — never lets the interview start while
+    /// required documents are still indexing.
+    private func interviewReadinessGate(for session: Session) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Preparing Interview Context")
+                .font(.title2.bold())
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(viewModel.lastCreatedDocuments) { document in
+                    HStack {
+                        Text(document.fileName)
+                        Spacer()
+                        Text(knowledgeIngestionTracker.status(forDocumentID: document.id).displayText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+
+            if isInterviewContextReady {
+                Text(readinessSummaryText)
+                    .font(.callout)
+                    .foregroundStyle(.green)
+            } else {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Indexing documents…").font(.callout)
+                }
+            }
+
+            HStack {
+                Button("Start Interview") {
+                    coordinator.requestStartLiveSession(for: session)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!isInterviewContextReady)
+
+                if !isInterviewContextReady {
+                    Button("Start anyway") {
+                        coordinator.requestStartLiveSession(for: session)
+                    }
+                    .font(.caption)
+                }
+            }
+        }
+    }
+
+    private var isInterviewContextReady: Bool {
+        viewModel.lastCreatedDocuments.allSatisfy { document in
+            let status = knowledgeIngestionTracker.status(forDocumentID: document.id)
+            return status == .ready || status == .failed || status == .unsupported
+        }
+    }
+
+    private var readinessSummaryText: String {
+        let hasResume = viewModel.lastCreatedDocuments.contains { $0.documentKind == DocumentKind.resume.rawValue }
+        return hasResume ? "Resume ready for interview. Interview context ready." : "Interview context ready."
+    }
+
+    private var isInterviewSession: Bool {
+        viewModel.sessionType == .interviewPractice
     }
 
     /// Company/role/participants/answer-style/notes are meaningful for

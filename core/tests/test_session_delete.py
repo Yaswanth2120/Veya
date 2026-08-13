@@ -23,6 +23,7 @@ class SessionDeleteDataTests(unittest.IsolatedAsyncioTestCase):
                 memory_database_path=base / "memory.sqlite",
                 report_store_directory=base / "reports",
             )
+            self.addCleanup(context.close)
             dispatcher = Dispatcher()
 
             await dispatcher.dispatch(Request(id="1", method="coding.upsert_file", params={"session_id": "s-1", "name": "main.py", "language": "python", "content": "x = 1"}), context)
@@ -56,6 +57,7 @@ class SessionDeleteDataTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             context = WorkerContext(emit_event=_ignore_event, knowledge_index_directory=base / "knowledge")
+            self.addCleanup(context.close)
             from veya.knowledge.vector_store import VectorStore
 
             vector_store = VectorStore(base / "knowledge" / "knowledge.sqlite")

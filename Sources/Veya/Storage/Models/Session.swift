@@ -76,6 +76,25 @@ struct Session: Identifiable, Codable, Equatable, FetchableRecord, PersistableRe
     static let databaseTableName = "session"
 }
 
+/// Section 16: which role an attached document plays for Interview
+/// Copilot retrieval — `.other` (the default) means "no special
+/// treatment," matching every document attached before this existed.
+enum DocumentKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case resume
+    case jobDescription
+    case other
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .resume: return "Resume"
+        case .jobDescription: return "Job Description"
+        case .other: return "Other"
+        }
+    }
+}
+
 struct SessionDocument: Identifiable, Codable, Equatable, FetchableRecord, PersistableRecord {
     var id: UUID
     var sessionID: UUID
@@ -86,6 +105,11 @@ struct SessionDocument: Identifiable, Codable, Equatable, FetchableRecord, Persi
     var storedPath: String
     var fileSizeBytes: Int64
     var addedAt: Date
+    /// Section 16: "resume"/"jobDescription"/"other" — stored as the raw
+    /// string (not `DocumentKind` directly) so an unrecognized future
+    /// value never fails to decode a persisted row. Defaults to "other"
+    /// for documents attached before this field existed.
+    var documentKind: String = DocumentKind.other.rawValue
 
     static let databaseTableName = "sessionDocument"
 }

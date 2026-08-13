@@ -48,6 +48,9 @@ class MemoryStore:
         )
         self._connection.commit()
 
+    def close(self) -> None:
+        self._connection.close()
+
     def create_candidate(self, session_id: str, text: str) -> MemoryRecord:
         now = time.time()
         record = MemoryRecord(id=str(uuid.uuid4()), session_id=session_id, text=text, status=STATUS_PROPOSED, created_at=now, updated_at=now)

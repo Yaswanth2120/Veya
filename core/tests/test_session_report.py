@@ -47,6 +47,7 @@ class SessionAnalyzeTests(unittest.IsolatedAsyncioTestCase):
         })
         with tempfile.TemporaryDirectory() as temporary:
             context = WorkerContext(emit_event=_ignore_event, memory_database_path=Path(temporary) / "memory.sqlite", report_store_directory=Path(temporary) / "reports", llm_provider_factory=lambda: provider)
+            self.addCleanup(context.close)
             dispatcher = Dispatcher()
             report = await dispatcher.dispatch(Request(id="1", method="session.analyze", params={"session_id": "s-1", "transcript": _TRANSCRIPT, "questions": _QUESTIONS, "answers": _ANSWERS}), context)
 
@@ -80,6 +81,7 @@ class SessionAnalyzeTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             context = WorkerContext(emit_event=_ignore_event, memory_database_path=Path(temporary) / "memory.sqlite", report_store_directory=Path(temporary) / "reports", llm_provider_factory=_UnavailableProvider)
+            self.addCleanup(context.close)
             report = await Dispatcher().dispatch(Request(id="1", method="session.analyze", params={"session_id": "s-1", "transcript": [], "questions": [], "answers": []}), context)
             self.assertEqual(report["memory_candidate_ids"], [])
             self.assertIn("No local LLM", report["summary"])
@@ -98,8 +100,10 @@ class SessionAnalyzeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             report_dir = Path(temporary) / "reports"
             first_context = WorkerContext(emit_event=_ignore_event, memory_database_path=Path(temporary) / "memory.sqlite", report_store_directory=report_dir, llm_provider_factory=lambda: provider)
+            self.addCleanup(first_context.close)
             await Dispatcher().dispatch(Request(id="1", method="session.analyze", params={"session_id": "s-1", "transcript": _TRANSCRIPT, "questions": [], "answers": []}), first_context)
 
             second_context = WorkerContext(emit_event=_ignore_event, memory_database_path=Path(temporary) / "memory2.sqlite", report_store_directory=report_dir)
+            self.addCleanup(second_context.close)
             fetched = await Dispatcher().dispatch(Request(id="2", method="session.report.get", params={"session_id": "s-1"}), second_context)
             self.assertEqual(fetched["summary"], "Discussed a six-week migration plan.")

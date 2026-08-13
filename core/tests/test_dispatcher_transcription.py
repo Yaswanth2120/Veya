@@ -45,6 +45,24 @@ def _unavailable_embedding_provider_factory():
     raise EmbeddingUnavailableError("no embedding provider configured for this test")
 
 
+# `transcription.start` always resolves approved memory (Section 13),
+# lazily opening a real (held-open, `check_same_thread=False`) sqlite
+# connection via `WorkerContext.memory_store` — every one of this file's
+# ~35 `make_context()` calls exercises that path. Rather than requiring
+# every single test to remember `self.addCleanup(context.close)`,
+# `make_context` tracks every context it creates here, and
+# `tearDownModule` (run once, automatically, after every test in this
+# file) closes them all — the systemic fix for the "unclosed database"
+# `ResourceWarning`s this file used to produce in bulk.
+_created_contexts: list[WorkerContext] = []
+
+
+def tearDownModule() -> None:
+    for context in _created_contexts:
+        context.close()
+    _created_contexts.clear()
+
+
 def make_context(
     engine_factory=FakeEngine,
     llm_provider_factory=_UnavailableLLMProvider,
@@ -52,21 +70,20 @@ def make_context(
     knowledge_index_directory: Path = None,
 ) -> tuple[WorkerContext, RecordingEmitter]:
     emitter = RecordingEmitter()
-    return (
-        WorkerContext(
-            emit_event=emitter,
-            transcription_engine_factory=engine_factory,
-            llm_provider_factory=llm_provider_factory,
-            embedding_provider_factory=embedding_provider_factory,
-            knowledge_index_directory=knowledge_index_directory or Path(tempfile.mkdtemp(prefix="veya-test-knowledge-")),
-            # `transcription.start` always resolves approved memory (Section
-            # 13) — without this override every test here would otherwise
-            # open a real SQLite file under the developer's actual
-            # Application Support directory.
-            memory_database_path=Path(tempfile.mkdtemp(prefix="veya-test-memory-")) / "memory.sqlite",
-        ),
-        emitter,
+    context = WorkerContext(
+        emit_event=emitter,
+        transcription_engine_factory=engine_factory,
+        llm_provider_factory=llm_provider_factory,
+        embedding_provider_factory=embedding_provider_factory,
+        knowledge_index_directory=knowledge_index_directory or Path(tempfile.mkdtemp(prefix="veya-test-knowledge-")),
+        # `transcription.start` always resolves approved memory (Section
+        # 13) — without this override every test here would otherwise
+        # open a real SQLite file under the developer's actual
+        # Application Support directory.
+        memory_database_path=Path(tempfile.mkdtemp(prefix="veya-test-memory-")) / "memory.sqlite",
     )
+    _created_contexts.append(context)
+    return context, emitter
 
 
 def make_pcm_base64(num_bytes: int = 10) -> str:

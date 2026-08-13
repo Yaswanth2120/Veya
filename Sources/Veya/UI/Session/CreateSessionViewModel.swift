@@ -7,6 +7,7 @@ final class CreateSessionViewModel: ObservableObject {
         let fileExtension: String
         let fileSizeBytes: Int64
         let sourceURL: URL
+        var kind: DocumentKind = .other
     }
 
     @Published var title = ""
@@ -25,6 +26,19 @@ final class CreateSessionViewModel: ObservableObject {
     @Published var attachedDocuments: [PendingDocument] = []
     @Published var isFileImporterPresented = false
     @Published var errorMessage: String?
+    /// Section 16: Interview Copilot requires a resume before starting
+    /// unless the user explicitly opts out — mirrors
+    /// `InterviewPreflightStatus.resumeRequired`.
+    @Published var startWithoutResume = false
+
+    var hasResumeDocument: Bool {
+        attachedDocuments.contains { $0.kind == .resume }
+    }
+
+    func setDocumentKind(_ kind: DocumentKind, forFileNamed fileName: String) {
+        guard let index = attachedDocuments.firstIndex(where: { $0.fileName == fileName }) else { return }
+        attachedDocuments[index].kind = kind
+    }
 
     /// The `SessionDocument` rows actually persisted by the most recent
     /// `save()` call — the caller (`CreateSessionView`) uses these to
@@ -131,7 +145,8 @@ final class CreateSessionViewModel: ObservableObject {
                 fileExtension: pending.fileExtension,
                 storedPath: destination.path,
                 fileSizeBytes: pending.fileSizeBytes,
-                addedAt: Date()
+                addedAt: Date(),
+                documentKind: pending.kind.rawValue
             )
             try await documentRepository.create(document)
             lastCreatedDocuments.append(document)
