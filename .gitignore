@@ -17,3 +17,5 @@ htmlcov/
 *.sqlite3
 KnowledgeIndex/
 SessionDocuments/
+.claude/
+.vscode/
