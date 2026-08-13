@@ -149,15 +149,28 @@ class WorkerContext:
             self.feed_task = None
 
     async def close_transcription_session_if_running(self) -> None:
+        # Producer before consumer: `session.close()` flushes trailing
+        # audio and force-finalizes any still-open VAD turn, which can
+        # call back into the *still-open* orchestrator
+        # (`on_turn_boundary` -> `handle_turn_boundary`) to finalize a
+        # trailing turn spoken right at session end. Closing the
+        # orchestrator first (the old order) meant that callback fired on
+        # an orchestrator that had already "closed" — genuinely finalizing
+        # a real trailing turn, but capable of starting an answer
+        # generation nothing then waited for, so its events could arrive
+        # after Swift had already detached and be silently dropped. This
+        # order plus `ConversationOrchestrator.close()` now bounded-
+        # awaiting its own final answer (see there) makes "session stop
+        # flushes the final pending turn" actually deliver that turn's
+        # answer, not just internally detect it.
+        if self.transcription_session is not None:
+            session = self.transcription_session
+            self.transcription_session = None
+            await session.close()
         if self.conversation_orchestrator is not None:
             orchestrator = self.conversation_orchestrator
             self.conversation_orchestrator = None
             await orchestrator.close()
-        if self.transcription_session is None:
-            return
-        session = self.transcription_session
-        self.transcription_session = None
-        await session.close()
 
 
 def _get_or_create_vector_store(context: WorkerContext) -> VectorStore:

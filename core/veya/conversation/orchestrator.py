@@ -36,6 +36,12 @@ EmitEvent = Callable[[str, dict], Awaitable[None]]
 
 _GENERATION_FAILED_MESSAGE = "Answer generation failed — the local LLM provider became unavailable mid-response."
 _MAX_RECENT_TRANSCRIPT_CHARACTERS = 2_400
+# Bounds how long `close()` waits for a still-in-flight answer (including
+# one just started by a trailing turn flushed at session end) before
+# giving up and cancelling it — long enough for a real local model to
+# finish a normal answer, short enough that ending a session doesn't feel
+# hung waiting on a slow/stuck generation.
+_FINAL_ANSWER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
 class ConversationOrchestrator:
@@ -264,20 +270,33 @@ class ConversationOrchestrator:
             pass
 
     async def close(self) -> None:
-        # Flushes whatever the turn assembler already has buffered from
-        # completed windows — `transcription.stop` only reaches here after
-        # every prior `transcription.audio_chunk` RPC has already been
-        # processed, so this covers everything except the very last
-        # partial trailing window, which `TranscriptionSession.close()`'s
-        # own VAD-triggered flush (still reachable via the bound
-        # `on_turn_boundary` callback even after this method returns)
-        # covers separately. If this starts a fresh answer generation for
-        # the flushed turn, it must not be immediately cancelled by the
-        # unconditional `cancel_active_answer()` below — that call is only
-        # for a *previous*, now-stale generation.
+        # `dispatcher.py`'s `close_transcription_session_if_running` calls
+        # `TranscriptionSession.close()` *before* this — its own trailing-
+        # audio flush + VAD force-finalize can call back into
+        # `handle_turn_boundary` while this orchestrator is still fully
+        # open, possibly already starting an answer generation for
+        # whatever was spoken right at session end. This flush then covers
+        # anything from *completed* windows that hadn't reached a turn
+        # boundary yet (rare once the above already ran, but harmless if
+        # it finds nothing).
         finalized_turn = self._turn_assembler.flush()
-        started_final_answer = False
         if finalized_turn is not None:
-            started_final_answer = await self._process_finalized_turn(finalized_turn)
-        if not started_final_answer:
-            await self.cancel_active_answer()
+            await self._process_finalized_turn(finalized_turn)
+
+        # Whatever is active at this point — started by the flush above,
+        # by `TranscriptionSession.close()`'s own callback moments ago, or
+        # simply still streaming from an earlier question — gets a
+        # bounded chance to actually finish and deliver its events,
+        # rather than being unconditionally cancelled. A session ending
+        # moments after the last question was asked must not silently
+        # drop that answer; a session ending mid-generation with no
+        # bound would otherwise make "End Session" feel hung.
+        task = self._active_answer_task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(task, timeout=_FINAL_ANSWER_SHUTDOWN_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001 - timeout (task is cancelled by wait_for itself) or a generation error already handled/logged inside the task
+            pass
+        finally:
+            self._active_answer_task = None

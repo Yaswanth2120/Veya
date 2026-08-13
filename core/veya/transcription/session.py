@@ -55,12 +55,30 @@ class TranscriptionSession:
         on_final_transcript: Optional[Callable[[str, float, float], Awaitable[None]]] = None,
         on_turn_boundary: Optional[Callable[[float], Awaitable[None]]] = None,
         vad: Optional[VoiceActivityDetector] = None,
+        partial_window_seconds: float = 2.0,
+        partial_interval_seconds: float = 1.0,
     ) -> None:
         self.session_id = session_id
         self._buffer = RollingWindowBuffer(RollingWindowConfig(sample_rate_hz=sample_rate_hz))
         self._engine = engine
         self._emit_event = emit_event
         self._run_blocking = run_blocking or self._default_run_blocking
+        # Section 14: `transcript.partial` is real, not decorative — a
+        # short (default 2s) trailing window is re-transcribed with the
+        # same engine roughly once a second *while speech is ongoing*
+        # (never during silence — nothing new to show), independently of
+        # the ~4s final-window cadence below. Genuinely more Whisper
+        # invocations (more CPU), which is the real cost of not waiting a
+        # full 4 seconds before showing any feedback. Never persisted,
+        # never fed into turn assembly/question detection — purely a live
+        # preview Swift replaces wholesale on the next partial or clears
+        # on the next `transcript.final`.
+        self._sample_rate_hz = sample_rate_hz
+        self._partial_buffer = bytearray()
+        self._partial_window_bytes = max(int(partial_window_seconds * sample_rate_hz) * 2, 2)
+        self._partial_interval_bytes = max(int(partial_interval_seconds * sample_rate_hz) * 2, 2)
+        self._bytes_since_last_partial = 0
+        self._partial_task: Optional[asyncio.Task] = None
         # Section 8: called with (text, started_at, ended_at) right after
         # a `transcript.final` is actually emitted (i.e. post-dedup,
         # never for an empty/fully-deduplicated window) — this is the
@@ -110,12 +128,30 @@ class TranscriptionSession:
         self._validate_sequence(sequence)
         self._bytes_since_last_window += len(pcm)
         self._last_chunk_end_time = started_at + duration
-        await self._process_turn_signal(self._vad.process_chunk(pcm, duration))
+        signal = self._vad.process_chunk(pcm, duration)
+        await self._process_turn_signal(signal)
+        self._maybe_schedule_partial_transcription(pcm)
 
         window = self._buffer.add_chunk(pcm)
         if window is not None:
             self._bytes_since_last_window = 0
             await self._window_queue.put((window, started_at, duration))
+
+    def _maybe_schedule_partial_transcription(self, pcm: bytes) -> None:
+        self._partial_buffer.extend(pcm)
+        if len(self._partial_buffer) > self._partial_window_bytes:
+            del self._partial_buffer[: len(self._partial_buffer) - self._partial_window_bytes]
+        self._bytes_since_last_partial += len(pcm)
+
+        due = self._bytes_since_last_partial >= self._partial_interval_bytes
+        idle = self._partial_task is None or self._partial_task.done()
+        # Only while actually in speech — silence has nothing new to
+        # preview, and re-transcribing it repeatedly would just waste CPU
+        # and risk surfacing a non-speech marker as if it were a partial.
+        if due and idle and self._vad.is_in_speech:
+            self._bytes_since_last_partial = 0
+            snapshot = bytes(self._partial_buffer)
+            self._partial_task = asyncio.create_task(self._transcribe_and_emit_partial(snapshot))
 
     async def _process_turn_signal(self, signal: TurnSignal) -> None:
         if signal == TurnSignal.NONE:
@@ -146,6 +182,20 @@ class TranscriptionSession:
             finally:
                 self._window_queue.task_done()
 
+    async def _transcribe_and_emit_partial(self, pcm: bytes) -> None:
+        try:
+            raw_text = await self._run_blocking(lambda: self._engine.transcribe_pcm(pcm, self._sample_rate_hz))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - never let a partial-transcription failure crash the worker or leak content
+            logger.error("Unhandled %s while transcribing a partial window", type(exc).__name__)
+            return
+
+        text = raw_text.strip()
+        if not text or _is_non_speech_marker(text):
+            return
+        await self._emit_event("transcript.partial", events.transcript_partial(session_id=self.session_id, text=text))
+
     async def _transcribe_and_emit(self, window: bytes, started_at: float, duration: float) -> None:
         raw_text = await self._run_blocking(lambda: self._engine.transcribe_pcm(window, self._buffer.sample_rate_hz))
         text = raw_text.strip()
@@ -156,6 +206,13 @@ class TranscriptionSession:
         self._previous_text = text
         if not deduped:
             return
+
+        # The content up through this final window is now superseded by
+        # `transcript.final` itself — clears the short partial-preview
+        # buffer so the next partial only ever previews genuinely new
+        # audio, never content Swift already has as final.
+        self._partial_buffer.clear()
+        self._bytes_since_last_partial = 0
 
         ended_at = started_at + duration
         await self._emit_event(
@@ -188,6 +245,13 @@ class TranscriptionSession:
         overlap tail, already covered by the previous `transcript.final`,
         and re-transcribing it would be a redundant Whisper call for
         content `dedupe_overlap` would strip anyway."""
+        if self._partial_task is not None and not self._partial_task.done():
+            self._partial_task.cancel()
+            try:
+                await self._partial_task
+            except asyncio.CancelledError:
+                pass
+
         remaining = self._buffer.flush()
         if remaining is not None and self._bytes_since_last_window > 0:
             # Real timestamps, not placeholders: `_process_turn_signal`'s

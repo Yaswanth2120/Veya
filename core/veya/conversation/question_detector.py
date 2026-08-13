@@ -37,6 +37,21 @@ _SPOKEN_PROMPT_RE = re.compile(
 _PUNCTUATION_RE = re.compile(r"[^\w\s]")
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# An interrogative word appearing *anywhere* in the turn, not just as the
+# (post-filler-stripped) leading word — e.g. "the caching layer, how does
+# that scale" or "you mentioned retries, what's the backoff policy". A
+# genuinely weaker signal than `interrogative_start_score` (which already
+# covers the leading-word case on its own): this exists specifically so
+# realistic mid-sentence-interrogative turns land in the ambiguous
+# [`ambiguous_low_bound`, `confidence_threshold`) band and actually reach
+# the semantic classifier, rather than the additive scoring only ever
+# landing on the handful of discrete values the "big" signals below
+# produce (0, 0.2, 0.6, 0.65, 0.75, or their sums) — none of which
+# naturally fall in that band.
+_INTERROGATIVE_WORD_RE = re.compile(
+    r"\b(?:why|how|what|when|who|whom|whose|where|which)\b", re.IGNORECASE
+)
+
 
 @dataclass(frozen=True)
 class QuestionDetectionConfig:
@@ -45,6 +60,7 @@ class QuestionDetectionConfig:
     interrogative_start_score: float = 0.65
     contains_question_mark_score: float = 0.2
     spoken_prompt_score: float = 0.75
+    mid_sentence_interrogative_score: float = 0.4
     max_recent_questions_tracked: int = 20
 
 
@@ -100,11 +116,19 @@ class QuestionDetector:
         first_word = words[0].strip(".,!?") if words else ""
         if first_word in _LEADING_FILLER_WORDS and len(words) > 1:
             first_word = words[1].strip(".,!?")
-        if first_word in _INTERROGATIVE_STARTS:
+        is_leading_interrogative = first_word in _INTERROGATIVE_STARTS
+        if is_leading_interrogative:
             score += self._config.interrogative_start_score
 
         if _SPOKEN_PROMPT_RE.match(text):
             score += self._config.spoken_prompt_score
+        elif not is_leading_interrogative and _INTERROGATIVE_WORD_RE.search(text):
+            # Only a weaker, additional signal when the stronger leading-
+            # word/spoken-prompt checks didn't already fire — an
+            # interrogative word appearing later in an already-clear
+            # question ("why did it take six weeks") must not be double
+            # counted on top of the leading-word score.
+            score += self._config.mid_sentence_interrogative_score
 
         return min(score, 1.0)
 

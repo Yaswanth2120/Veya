@@ -295,20 +295,14 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await orchestrator.close()
 
 
-def _make_ambiguous_detector():
-    """The stock scoring config has no text that naturally lands in the
-    [0.35, confidence_threshold) ambiguous band — every real signal it
-    recognizes either clears the threshold outright or scores 0.2 (below
-    the classifier's own low-confidence-reject bound). These tests inject
-    a detector config where a mid-sentence "?" scores 0.45, deliberately
-    landing in that band, so the semantic-classifier path is actually
-    exercised rather than always short-circuited by the deterministic gate."""
-    from veya.conversation.question_detector import QuestionDetectionConfig, QuestionDetector
-
-    return QuestionDetector(QuestionDetectionConfig(contains_question_mark_score=0.45))
-
-
-_AMBIGUOUS_TEXT = "the caching strategy? explain more"
+# A genuinely realistic ambiguous turn under the *default* scoring
+# config: a mid-sentence interrogative ("how") that isn't the leading
+# word, so it scores via `mid_sentence_interrogative_score` (0.4) alone —
+# landing in the classifier's ambiguous band without any custom detector
+# configuration. Real spoken interview follow-ups look exactly like this
+# ("the caching layer, how does that scale" / "you mentioned retries,
+# what's the backoff policy").
+_AMBIGUOUS_TEXT = "the caching layer, how does that scale"
 
 
 class SemanticClassifierFallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -325,7 +319,7 @@ class SemanticClassifierFallbackTests(unittest.IsolatedAsyncioTestCase):
         emitter = RecordingEmitter()
         orchestrator = ConversationOrchestrator(
             session_id="s1", session_context=SessionContext(), emit_event=emitter,
-            llm_provider=JSONProvider(), question_detector=_make_ambiguous_detector(),
+            llm_provider=JSONProvider(),
         )
         await finalize_turn(orchestrator, _AMBIGUOUS_TEXT, 0.0, 2.0)
         await emitter.wait_for_count(2)  # question.classifying, question.detected
@@ -342,7 +336,7 @@ class SemanticClassifierFallbackTests(unittest.IsolatedAsyncioTestCase):
         emitter = RecordingEmitter()
         orchestrator = ConversationOrchestrator(
             session_id="s1", session_context=SessionContext(), emit_event=emitter,
-            llm_provider=BrokenJSONProvider(), question_detector=_make_ambiguous_detector(),
+            llm_provider=BrokenJSONProvider(),
         )
         await finalize_turn(orchestrator, _AMBIGUOUS_TEXT, 0.0, 2.0)
         await asyncio.sleep(0.2)
@@ -361,7 +355,7 @@ class SemanticClassifierFallbackTests(unittest.IsolatedAsyncioTestCase):
         emitter = RecordingEmitter()
         orchestrator = ConversationOrchestrator(
             session_id="s1", session_context=SessionContext(), emit_event=emitter,
-            llm_provider=HangingProvider(), question_detector=_make_ambiguous_detector(),
+            llm_provider=HangingProvider(),
         )
         # `finalize_turn` blocks for the classifier's own bounded timeout
         # (a handful of seconds) before returning — a genuine timeout,
@@ -378,7 +372,7 @@ class SemanticClassifierFallbackTests(unittest.IsolatedAsyncioTestCase):
         emitter = RecordingEmitter()
         orchestrator = ConversationOrchestrator(
             session_id="s1", session_context=SessionContext(), emit_event=emitter,
-            llm_provider=RejectingProvider(), question_detector=_make_ambiguous_detector(),
+            llm_provider=RejectingProvider(),
         )
         await finalize_turn(orchestrator, _AMBIGUOUS_TEXT, 0.0, 2.0)
         await emitter.wait_for_count(2)

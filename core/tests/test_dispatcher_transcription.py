@@ -351,6 +351,87 @@ class _AvailableLLMProvider:
         return None
 
 
+class _FastAnswerProvider:
+    """A fake `llm_provider_factory` target that both reports itself
+    available and answers instantly — no real network I/O, no delay."""
+
+    async def check_availability(self) -> None:
+        return None
+
+    async def generate_stream(self, prompt, *, timeout):
+        yield "ANSWER: Six weeks, staged rollout.\nPOINTS:\n- staged rollout\n"
+
+
+class _QuestionEngine:
+    """Always transcribes to a real (short) interview question — a
+    leading interrogative, so the deterministic gate accepts it without
+    needing a real/fake semantic-classification round trip."""
+
+    def transcribe_pcm(self, pcm_s16le: bytes, sample_rate_hz: int) -> str:
+        return "Why did the migration take six weeks"
+
+
+class SessionStopFlushesTrailingTurnIntoARealAnswerTests(unittest.IsolatedAsyncioTestCase):
+    """Regression test for a review finding: `close_transcription_session_if_running`
+    used to close the `ConversationOrchestrator` *before* `TranscriptionSession`,
+    so a turn finalized by `TranscriptionSession.close()`'s own trailing-audio/
+    VAD force-finalize flush could start an answer generation nothing then
+    waited for — its events could arrive after Swift had already detached
+    and be silently dropped. Exercises the exact scenario: the user is
+    still mid-speech (VAD never reached a silence endpoint) when the
+    session is stopped, through the real `Dispatcher`, asserting the
+    resulting answer is actually present in the emitted events by the
+    time `transcription.stop` returns — not merely fired-and-forgotten
+    in the background."""
+
+    async def test_a_trailing_turn_still_in_speech_at_stop_produces_a_delivered_answer(self):
+        context, emitter = make_context(engine_factory=_QuestionEngine, llm_provider_factory=_FastAnswerProvider)
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        await dispatcher.dispatch(
+            Request(
+                id="2", method="transcription.start",
+                # A low sample rate keeps one full 4s window well under
+                # the per-chunk IPC size cap, so a single chunk both
+                # completes a window (real transcript.final) and is loud
+                # enough to put VAD into "speech" — deliberately never
+                # sending a quiet/silent chunk afterward, so VAD never
+                # reaches a silence endpoint on its own.
+                params={"session_id": "s1", "sample_rate_hz": 4000, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+
+        import struct
+
+        window_bytes = 4 * 4000 * 2  # RollingWindowConfig's default window_seconds=4.0
+        loud_sample = struct.pack("<hh", 6000, -6000)
+        loud_pcm = (loud_sample * (window_bytes // 4 + 1))[:window_bytes]
+        await dispatcher.dispatch(
+            Request(
+                id="3", method="transcription.audio_chunk",
+                params={
+                    "session_id": "s1", "sequence": 0, "started_at_seconds": 0.0, "duration_seconds": 4.0,
+                    "audio_base64": base64.b64encode(loud_pcm).decode("ascii"),
+                },
+            ),
+            context,
+        )
+
+        # Speech is still "in progress" from VAD's point of view — no
+        # silence endpoint has been reached, and no question.detected has
+        # fired yet.
+        self.assertNotIn("question.detected", [name for name, _ in emitter.events])
+
+        await dispatcher.dispatch(Request(id="4", method="transcription.stop", params={"session_id": "s1"}), context)
+
+        names = [name for name, _ in emitter.events]
+        self.assertIn("question.detected", names)
+        self.assertIn("answer.completed", names)
+        completed = next(data for name, data in emitter.events if name == "answer.completed")
+        self.assertIn("staged rollout", completed["talking_points"])
+
+
 class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_session_context_is_captured_from_session_start(self):
         context, _ = make_context()

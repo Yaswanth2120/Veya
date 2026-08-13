@@ -91,6 +91,32 @@ class QuestionDetectorTests(unittest.TestCase):
         self.assertIsNone(default_detector.detect(text))
         self.assertIsNotNone(detector.detect(text))
 
+    def test_mid_sentence_interrogative_scores_in_the_ambiguous_band_not_instant_accept(self):
+        # A review found the additive scoring had no real text landing in
+        # [0.35, 0.6) — every signal either cleared the 0.6 threshold
+        # outright or scored 0.2. This is a genuinely realistic spoken
+        # follow-up (interrogative word present, but not leading) that
+        # must score below the accept threshold (ambiguous, not instant
+        # accept) while still clearing a low-confidence-reject bound.
+        detector = QuestionDetector()
+        score = detector.score("the caching layer, how does that scale")
+        self.assertLess(score, detector.confidence_threshold)
+        self.assertGreater(score, 0.2)
+        self.assertIsNone(detector.detect("the caching layer, how does that scale"))
+
+    def test_mid_sentence_interrogative_is_not_double_counted_with_leading_interrogative(self):
+        detector = QuestionDetector()
+        # "why" both leads (post-filler-strip) *and* appears later isn't
+        # possible in one word, so use a sentence where the leading
+        # interrogative already scores on its own — the mid-sentence
+        # signal must not additionally stack on top of it.
+        leading_only_score = detector.score("Why did the migration take six weeks")
+        self.assertAlmostEqual(leading_only_score, 0.65, places=2)
+
+    def test_ordinary_statement_with_no_interrogative_word_anywhere_still_scores_zero(self):
+        detector = QuestionDetector()
+        self.assertEqual(detector.score("we moved the auth service first since it mattered"), 0.0)
+
     def test_recent_question_tracking_is_bounded(self):
         config = QuestionDetectionConfig(max_recent_questions_tracked=2)
         detector = QuestionDetector(config)

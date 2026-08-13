@@ -64,9 +64,15 @@ class OllamaSmokeTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_measured_latency_turn_endpoint_to_first_answer_delta(self):
         """Prints (does not assert — this is environment/hardware-specific,
-        never a benchmark claim) real measured latency against a real
-        local Ollama instance: finalized-turn -> question.detected, and
-        question.detected -> the first streamed answer.delta."""
+        never a benchmark claim) real measured latency for the
+        classification + generation legs only: finalized-turn ->
+        question.detected (pure local computation, no I/O), and
+        question.detected -> the first streamed answer.delta (a real
+        local Ollama call). Text is injected directly, not spoken through
+        a real microphone/Whisper — it deliberately excludes the
+        audio -> transcript latency, which is measured separately (and
+        is the dominant cost) in `test_realtime_pipeline_latency_smoke.py`.
+        Reported together, not in isolation, in the README."""
         provider = OllamaProvider()
         await provider.check_availability()
 
@@ -101,7 +107,7 @@ class OllamaSmokeTest(unittest.IsolatedAsyncioTestCase):
 
         if "question.detected" in timestamps:
             turn_to_detected_ms = (timestamps["question.detected"] - turn_endpoint_time) * 1000
-            print(f"\n[latency, this environment only] turn endpoint -> question.detected: {turn_to_detected_ms:.1f}ms")
+            print(f"\n[latency, this environment only, TEXT-INJECTED — excludes audio->transcript] finalized turn -> question.detected: {turn_to_detected_ms:.1f}ms")
         if "first_answer_delta" in timestamps and "question.detected" in timestamps:
             detected_to_delta_ms = (timestamps["first_answer_delta"] - timestamps["question.detected"]) * 1000
-            print(f"[latency, this environment only] question.detected -> first answer.delta: {detected_to_delta_ms:.1f}ms")
+            print(f"[latency, this environment only, real local Ollama] question.detected -> first answer.delta: {detected_to_delta_ms:.1f}ms")

@@ -259,6 +259,59 @@ class TranscriptionSessionTests(unittest.IsolatedAsyncioTestCase):
         await session.close()
         self.assertEqual(boundary_calls, [0.5])  # trailing open turn flushed at session end
 
+    async def test_partial_transcription_fires_while_speech_is_ongoing_without_waiting_for_a_final_window(self):
+        # The actual "real-time, not just partial-capable-UI" fix: partial
+        # transcription must genuinely happen — re-transcribing a short
+        # trailing window on its own cadence — not just be a field Swift
+        # could theoretically render but Python never populates.
+        engine = FakeEngine(["partial preview"])
+        emitter = RecordingEmitter()
+        session = TranscriptionSession(
+            session_id="s1", sample_rate_hz=100, engine=engine, emit_event=emitter,
+            run_blocking=immediate_run_blocking, partial_window_seconds=0.5, partial_interval_seconds=0.2,
+        )
+
+        # One loud chunk covering exactly one partial interval — nowhere
+        # near completing a full (4s-equivalent) final window.
+        await session.handle_chunk(0, 0.0, 0.2, make_loud_pcm(40))
+        await emitter.wait_for_count(2)  # turn.state (speech), transcript.partial
+
+        names = [name for name, _ in emitter.events]
+        self.assertIn("transcript.partial", names)
+        partial_data = next(data for name, data in emitter.events if name == "transcript.partial")
+        self.assertEqual(partial_data["text"], "partial preview")
+        self.assertNotIn("transcript.final", names)  # nowhere near a full window yet
+
+        await session.close()
+
+    async def test_partial_transcription_does_not_fire_during_silence(self):
+        engine = FakeEngine(["should never be used"])
+        emitter = RecordingEmitter()
+        session = TranscriptionSession(
+            session_id="s1", sample_rate_hz=100, engine=engine, emit_event=emitter,
+            run_blocking=immediate_run_blocking, partial_window_seconds=0.5, partial_interval_seconds=0.2,
+        )
+
+        await session.handle_chunk(0, 0.0, 0.2, make_pcm(40))  # silent — VAD never enters speech
+        await asyncio.sleep(0.05)
+
+        self.assertEqual([name for name, _ in emitter.events], [])
+        await session.close()
+
+    async def test_non_speech_marker_from_a_partial_window_never_reaches_swift(self):
+        engine = FakeEngine(["[BLANK_AUDIO]"])
+        emitter = RecordingEmitter()
+        session = TranscriptionSession(
+            session_id="s1", sample_rate_hz=100, engine=engine, emit_event=emitter,
+            run_blocking=immediate_run_blocking, partial_window_seconds=0.5, partial_interval_seconds=0.2,
+        )
+
+        await session.handle_chunk(0, 0.0, 0.2, make_loud_pcm(40))
+        await asyncio.sleep(0.05)
+
+        self.assertNotIn("transcript.partial", [name for name, _ in emitter.events])
+        await session.close()
+
     async def test_engine_exception_does_not_crash_the_session_or_leak_message(self):
         class BoomEngine:
             def transcribe_pcm(self, pcm_s16le, sample_rate_hz):
