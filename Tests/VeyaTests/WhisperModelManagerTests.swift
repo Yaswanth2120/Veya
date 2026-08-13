@@ -167,8 +167,30 @@ struct WhisperModelManagerTests {
     func defaultManifestIsRepoCheckedInAndGenuinelyHashed() throws {
         let entry = WhisperModelManifest.recommended(environment: [:])
         #expect(entry != nil)
-        #expect(entry?.url.absoluteString == "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin")
         #expect(entry?.sha256.count == 64)
+    }
+
+    /// The real hardware-specific selection: arm64 and x86_64 must
+    /// resolve to *different* manifest entries (a different real, genuinely
+    /// hashed model file each), not the same entry with an ignored
+    /// `architecture` parameter. arm64 gets the larger, more accurate
+    /// `ggml-base.en`; x86_64 gets the lighter `ggml-tiny.en`.
+    @Test("arm64 and x86_64 resolve to different, genuinely hashed model entries")
+    func architectureSelectionPicksDifferentRealEntries() throws {
+        let arm64Entry = WhisperModelManifest.recommended(architecture: "arm64", environment: [:])
+        let x86Entry = WhisperModelManifest.recommended(architecture: "x86_64", environment: [:])
+
+        #expect(arm64Entry != nil)
+        #expect(x86Entry != nil)
+        #expect(arm64Entry?.id == "ggml-base.en")
+        #expect(x86Entry?.id == "ggml-tiny.en")
+        #expect(arm64Entry?.sha256 != x86Entry?.sha256)
+        #expect(arm64Entry?.sizeBytes != x86Entry?.sizeBytes)
+
+        // An architecture with no explicit entry falls back to "default"
+        // rather than resolving to nothing.
+        let unknownArchitectureEntry = WhisperModelManifest.recommended(architecture: "riscv64", environment: [:])
+        #expect(unknownArchitectureEntry != nil)
     }
 
     @Test("an explicit VEYA_WHISPER_MODEL_MANIFEST_PATH override wins, and its hash matches the real referenced file")

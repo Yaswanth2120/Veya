@@ -158,6 +158,19 @@ final class DatabaseManager: Sendable {
             }
         }
 
+        migrator.registerMigration("v4_addSessionReportAnswersAndSources") { db in
+            // `generatedAnswers`/`sources` were part of Python's
+            // `SessionReport` shape from the start (see
+            // `core/veya/conversation/report.py`) but were dropped on the
+            // way into GRDB — added as a separate migration (not folded
+            // into v3) so an already-migrated local database still
+            // upgrades cleanly instead of needing to be recreated.
+            try db.alter(table: SessionReport.databaseTableName) { t in
+                t.add(column: "generatedAnswers", .text).notNull().defaults(to: "[]")
+                t.add(column: "sources", .text).notNull().defaults(to: "[]")
+            }
+        }
+
         try migrator.migrate(dbWriter)
     }
 }

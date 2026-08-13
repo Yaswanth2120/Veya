@@ -83,6 +83,17 @@ private struct SessionReportSummaryView: View {
             Text("SESSION REPORT").font(.caption.bold())
             if !report.summary.isEmpty { Text(report.summary).font(.caption) }
             labeledList("Topics", report.topics)
+            if !report.generatedAnswers.isEmpty {
+                Text("Answers").font(.caption2.bold()).foregroundStyle(.secondary)
+                ForEach(Array(report.generatedAnswers.enumerated()), id: \.offset) { _, answer in
+                    Text("Q: \(answer.question)").font(.caption2)
+                    ForEach(answer.talkingPoints, id: \.self) { Text("  • \($0)").font(.caption2) }
+                }
+            }
+            if !report.sources.isEmpty {
+                Text("Sources").font(.caption2.bold()).foregroundStyle(.secondary)
+                ForEach(report.sources, id: \.chunkId) { Text("• \($0.fileName): \($0.excerpt)").font(.caption2) }
+            }
             labeledList("Decisions", report.decisions)
             labeledList("Action Items", report.actionItems)
             labeledList("Unanswered Questions", report.unansweredQuestions)

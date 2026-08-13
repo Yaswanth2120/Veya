@@ -1,8 +1,26 @@
 {
-  "id": "ggml-tiny.en",
-  "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
-  "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
-  "architecture": "universal",
-  "sizeBytes": 77704715,
-  "version": "1"
+  "arm64": {
+    "id": "ggml-base.en",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+    "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+    "architecture": "arm64",
+    "sizeBytes": 147964211,
+    "version": "1"
+  },
+  "x86_64": {
+    "id": "ggml-tiny.en",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+    "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+    "architecture": "x86_64",
+    "sizeBytes": 77704715,
+    "version": "1"
+  },
+  "default": {
+    "id": "ggml-tiny.en",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+    "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+    "architecture": "default",
+    "sizeBytes": 77704715,
+    "version": "1"
+  }
 }

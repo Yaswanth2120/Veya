@@ -60,6 +60,8 @@ struct SessionReport: Identifiable, Codable, Equatable, FetchableRecord, Persist
     let summary: String
     let topics: [String]
     let questions: [String]
+    let generatedAnswers: [ReportAnswer]
+    let sources: [AnswerSourceEventData]
     let decisions: [String]
     let actionItems: [String]
     let unansweredQuestions: [String]

@@ -39,8 +39,7 @@ enum WhisperModelManagerError: LocalizedError {
 /// plausible-looking hash for an asset that was never actually downloaded
 /// and verified here would be exactly the "hard-coded unverified hash"
 /// the packaging build prompt says not to ship. Instead this resolves a
-/// small JSON file shaped like `WhisperModelManifestEntry`, in priority
-/// order:
+/// small JSON file, in priority order:
 ///
 /// 1. `VEYA_WHISPER_MODEL_MANIFEST_PATH` (explicit override, dev/CI).
 /// 2. `Bundle.main`'s bundled `whisper_model_manifest.json` (a packaged
@@ -51,27 +50,38 @@ enum WhisperModelManagerError: LocalizedError {
 ///    this repository, same caveat as
 ///    `PythonWorkerConfiguration.projectRelativeDefaultWorkerDirectory()`).
 ///
-/// Every manifest value the repository ships was produced by actually
-/// downloading the referenced file and hashing it with `shasum -a 256` —
-/// not guessed. See `docs/PYTHON_PACKAGING.md` for the release procedure
-/// to follow when the referenced model release changes.
+/// The file may be shaped either as a single `WhisperModelManifestEntry`
+/// object, or — this is what `packaging/whisper_model_manifest.json`
+/// actually ships — a dictionary keyed by architecture (`"arm64"`,
+/// `"x86_64"`, `"default"`), so hardware selection genuinely picks a
+/// *different* model rather than accepting an `architecture` parameter it
+/// then ignores. Apple Silicon defaults to the larger, more accurate
+/// `ggml-base.en` (real-time transcription has enough headroom there);
+/// Intel defaults to the lighter `ggml-tiny.en`. Every value the
+/// repository ships was produced by actually downloading the referenced
+/// file and hashing it with `shasum -a 256` — not guessed. See
+/// `docs/PYTHON_PACKAGING.md` for the release procedure to follow when a
+/// referenced model release changes.
 enum WhisperModelManifest {
     static func recommended(architecture: String = currentArchitecture(), environment: [String: String] = ProcessInfo.processInfo.environment) -> WhisperModelManifestEntry? {
-        if let path = environment["VEYA_WHISPER_MODEL_MANIFEST_PATH"], let entry = decode(path: path) {
+        if let path = environment["VEYA_WHISPER_MODEL_MANIFEST_PATH"], let entry = decode(path: path, architecture: architecture) {
             return entry
         }
         if let bundled = Bundle.main.resourceURL?.appendingPathComponent("whisper_model_manifest.json").path,
-           let entry = decode(path: bundled) {
+           let entry = decode(path: bundled, architecture: architecture) {
             return entry
         }
-        if let entry = decode(path: projectRelativeManifestPath()) {
+        if let entry = decode(path: projectRelativeManifestPath(), architecture: architecture) {
             return entry
         }
         return nil
     }
 
-    private static func decode(path: String) -> WhisperModelManifestEntry? {
+    private static func decode(path: String, architecture: String) -> WhisperModelManifestEntry? {
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        if let byArchitecture = try? JSONDecoder().decode([String: WhisperModelManifestEntry].self, from: data) {
+            return byArchitecture[architecture] ?? byArchitecture["default"]
+        }
         return try? JSONDecoder().decode(WhisperModelManifestEntry.self, from: data)
     }
 

@@ -206,6 +206,7 @@ final class AppCoordinator: ObservableObject {
 
         let report = SessionReport(
             id: UUID(), sessionID: sessionID, summary: result.summary, topics: result.topics, questions: result.questions,
+            generatedAnswers: result.generatedAnswers, sources: result.sources,
             decisions: result.decisions, actionItems: result.actionItems, unansweredQuestions: result.unansweredQuestions,
             preparationGaps: result.preparationGaps, generatedAt: Date()
         )
