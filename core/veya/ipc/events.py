@@ -57,6 +57,13 @@ def transcript_final(
     }
 
 
+# Section 19: a typed, safe rejection diagnostic — never the rejected
+# text itself. Lets Swift show a compact "N noise events filtered" count
+# without ever exposing what was actually (mis)heard.
+def transcript_rejected(session_id: str, reason: str) -> dict:
+    return {"session_id": session_id, "reason": reason}
+
+
 def question_detected(
     session_id: str,
     question_id: str,

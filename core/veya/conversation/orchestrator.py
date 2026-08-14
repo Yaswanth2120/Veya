@@ -20,9 +20,16 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from .answer_generation import generate_answer
+from .groundedness import check_answer_groundedness, safe_fallback_answer
 from .context_builder import render_prompt
-from .models import SessionContext
+from .models import ParsedAnswer, SessionContext
 from .question_candidate_tracker import CandidateState, QuestionCandidateTracker
+from .transcript_eligibility import (
+    TranscriptRejectionReason,
+    classify_transcript_text,
+    classify_turn_quality,
+    looks_like_incomplete_sentence,
+)
 from .question_detector import QuestionDetector
 from .semantic_classifier import LOW_CONFIDENCE_REJECT_BOUND, classify_turn
 from .turn_assembler import TurnAssembler
@@ -62,6 +69,11 @@ _FINAL_ANSWER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 # it as finished anyway — short enough to feel responsive, long enough
 # that a fragment that's merely mid-utterance isn't answered prematurely.
 _SPECULATIVE_FINALIZE_DEBOUNCE_SECONDS = 0.7
+# Section 19: bounds how many extra debounce windows a structurally
+# incomplete turn (dangling "and"/"or"/comma — see
+# `looks_like_incomplete_sentence`) gets before speculative-finalizing
+# anyway — a turn that genuinely trails off must not wait forever.
+_MAX_SPECULATIVE_FINALIZE_EXTENSIONS = 4
 # Section 17: several interviewer questions can be spoken in quick
 # succession (the reported failure mode was cancelling a still-generating
 # answer every time). This bounds the pending-turn queue so a burst of
@@ -83,6 +95,11 @@ class _QueuedTurn:
     # rather than dequeue time (waiting in queue is not generation
     # latency).
     stabilized_at: float
+    # Section 19: the "recent conversation" context as of the moment
+    # *this* turn finalized — captured here, not recomputed at dequeue
+    # time, so another turn finalizing (and being remembered) while this
+    # one waits in queue never leaks into this turn's prompt.
+    recent_conversation_block: str = ""
 
 
 class ConversationOrchestrator:
@@ -222,6 +239,18 @@ class ConversationOrchestrator:
             await self._handle_user_final_transcript(text, started_at, ended_at)
             return
 
+        # Section 19: defense in depth — `TranscriptionSession`/
+        # `StreamingTranscriptionSession` already filter non-speech
+        # markers before this is ever called in production, but a
+        # marker-only fragment must never enter turn assembly from any
+        # call path.
+        if classify_transcript_text(text) == TranscriptRejectionReason.NON_SPEECH_MARKER:
+            await self._emit_event(
+                "transcript.rejected",
+                events.transcript_rejected(session_id=self.session_id, reason=TranscriptRejectionReason.NON_SPEECH_MARKER.value),
+            )
+            return
+
         finalized_turn = self._turn_assembler.add_fragment(text, started_at, ended_at)
         if finalized_turn is not None:
             self._cancel_speculative_finalize_timer()
@@ -355,18 +384,41 @@ class ConversationOrchestrator:
             self._speculative_finalize_task.cancel()
         self._speculative_finalize_task = None
 
-    async def _speculative_finalize_after_debounce(self) -> None:
+    async def _speculative_finalize_after_debounce(self, extension_count: int = 0) -> None:
         """Fires when no new fragment has extended the current turn for
         `_SPECULATIVE_FINALIZE_DEBOUNCE_SECONDS` after it already scored
         as a strong, complete prompt — finalizes the turn early rather
         than waiting on a VAD silence endpoint that may be delayed or may
         never arrive. Safe against races with the normal VAD-driven path:
         `TurnAssembler.flush()` returns `None` if the buffer was already
-        consumed there first, in which case this is a no-op."""
+        consumed there first, in which case this is a no-op.
+
+        Section 19: a compound question ("...bottleneck, and how...")
+        often has a natural pause right at the internal conjunction —
+        long enough to trip this debounce, short enough that it is not a
+        real VAD silence endpoint. If the buffered text still looks
+        structurally incomplete (dangling "and"/"or"/comma/etc.), this
+        does not finalize — it waits one more debounce window instead,
+        bounded (`_MAX_SPECULATIVE_FINALIZE_EXTENSIONS`) so a turn that
+        genuinely trails off mid-sentence still finalizes eventually
+        rather than waiting forever (a real VAD boundary/session-end
+        flush remains the ultimate backstop regardless)."""
         try:
             await asyncio.sleep(_SPECULATIVE_FINALIZE_DEBOUNCE_SECONDS)
         except asyncio.CancelledError:
             return
+
+        pending_text = self._turn_assembler.peek_pending_text()
+        if (
+            pending_text
+            and looks_like_incomplete_sentence(pending_text)
+            and extension_count < _MAX_SPECULATIVE_FINALIZE_EXTENSIONS
+        ):
+            self._speculative_finalize_task = asyncio.create_task(
+                self._speculative_finalize_after_debounce(extension_count=extension_count + 1)
+            )
+            return
+
         finalized_turn = self._turn_assembler.flush()
         if finalized_turn is not None:
             await self._process_finalized_turn(finalized_turn)
@@ -389,6 +441,30 @@ class ConversationOrchestrator:
             return False
         self._last_finalized_turn_text = stripped_turn_text or self._last_finalized_turn_text
 
+        # Section 19: a turn assembled entirely from noise/non-speech
+        # markers or ASR garbage (e.g. Whisper hallucinating on
+        # near-silent audio) is never remembered as context, classified,
+        # or allowed to create a question/queue entry/answer — rejected
+        # before it can contaminate anything downstream.
+        turn_quality = classify_turn_quality(turn_text)
+        if turn_quality != TranscriptRejectionReason.NONE:
+            if self._current_turn_speculative_question_id is not None:
+                await self.cancel_active_answer()
+                self._current_turn_speculative_question_id = None
+            self._candidate_tracker.on_reject()
+            await self._emit_event(
+                "transcript.rejected", events.transcript_rejected(session_id=self.session_id, reason=turn_quality.value)
+            )
+            return False
+
+        # Section 19: snapshot *before* remembering this turn's own text —
+        # this is "everything genuinely prior to this turn," captured at
+        # the moment it finalizes rather than lazily when generation
+        # actually starts. If this turn ends up queued behind another
+        # answer, other turns may finalize (and be remembered) in the
+        # meantime; without this snapshot, this turn's eventual prompt
+        # would silently absorb their unrelated text too.
+        recent_conversation_snapshot = self._recent_conversation_block(exclude_current_question=False)
         self._remember_transcript(turn_text)
 
         # Only announce "classifying" when the (slower) semantic stage is
@@ -459,6 +535,7 @@ class ConversationOrchestrator:
             await self._start_answer_generation(
                 question_id=question_id, question_text=question_text,
                 emit_draft_marker=True, is_replace=True, is_draft_stream=False, stabilized_at=stabilized_at,
+                recent_conversation_block=recent_conversation_snapshot,
             )
             return True
 
@@ -466,16 +543,23 @@ class ConversationOrchestrator:
             # A genuinely different, still-generating answer is active —
             # the fix for "a newer question cancels the still-running
             # answer": queue this turn instead, preserving order.
-            await self._enqueue_turn(question_id=question_id, question_text=question_text, stabilized_at=stabilized_at)
+            await self._enqueue_turn(
+                question_id=question_id, question_text=question_text, stabilized_at=stabilized_at,
+                recent_conversation_block=recent_conversation_snapshot,
+            )
             return True
 
         await self._start_answer_generation(
             question_id=question_id, question_text=question_text,
             emit_draft_marker=False, is_replace=False, is_draft_stream=False, stabilized_at=stabilized_at,
+            recent_conversation_block=recent_conversation_snapshot,
         )
         return True
 
-    async def _enqueue_turn(self, question_id: str, question_text: str, stabilized_at: Optional[float] = None) -> None:
+    async def _enqueue_turn(
+        self, question_id: str, question_text: str, stabilized_at: Optional[float] = None,
+        recent_conversation_block: str = "",
+    ) -> None:
         if len(self._answer_queue) >= _MAX_QUEUED_TURNS:
             await self._emit_event(
                 "answer.queue_overflow",
@@ -483,7 +567,10 @@ class ConversationOrchestrator:
             )
             return
         self._answer_queue.append(
-            _QueuedTurn(question_id=question_id, question_text=question_text, stabilized_at=stabilized_at or time.time())
+            _QueuedTurn(
+                question_id=question_id, question_text=question_text, stabilized_at=stabilized_at or time.time(),
+                recent_conversation_block=recent_conversation_block,
+            )
         )
         await self._emit_event(
             "answer.queued",
@@ -504,6 +591,7 @@ class ConversationOrchestrator:
         await self._start_answer_generation(
             question_id=next_turn.question_id, question_text=next_turn.question_text,
             emit_draft_marker=False, is_replace=False, is_draft_stream=False, stabilized_at=next_turn.stabilized_at,
+            recent_conversation_block=next_turn.recent_conversation_block,
         )
 
     async def retry_failed_answer(self, question_id: str, question_text: str) -> None:
@@ -550,8 +638,19 @@ class ConversationOrchestrator:
     async def _start_answer_generation(
         self, question_id: str, question_text: str, *, emit_draft_marker: bool = False, is_replace: bool = False,
         is_draft_stream: bool = False, exclude_current_question_from_context: bool = True,
-        stabilized_at: Optional[float] = None,
+        stabilized_at: Optional[float] = None, recent_conversation_block: Optional[str] = None,
     ) -> None:
+        # Section 19: `recent_conversation_block`, when given, is a
+        # snapshot taken at *finalize* time (see `_process_finalized_turn`)
+        # — required for a turn that gets queued, since by the time a
+        # queued turn actually starts generating, other unrelated turns
+        # may have finalized (and been remembered) in between; computing
+        # this lazily at generation-start time would silently pull their
+        # text into this turn's prompt. `None` means "compute it now" —
+        # only ever safe for the speculative-draft path, which always
+        # starts synchronously with nothing else active/queued.
+        if recent_conversation_block is None:
+            recent_conversation_block = self._recent_conversation_block(exclude_current_question_from_context)
         # Callers only ever invoke this when cancelling is either correct
         # (replacing a speculative draft for this SAME turn) or a no-op
         # (nothing else active) — a genuinely different, still-generating
@@ -587,8 +686,16 @@ class ConversationOrchestrator:
             question_text,
             document_context_block=document_context_block,
             memory_context_block=memory_context_block,
-            recent_conversation_block=self._recent_conversation_block(exclude_current_question_from_context),
+            recent_conversation_block=recent_conversation_block,
             user_answer_block=self._recent_user_answer_text or "",
+        )
+
+        # Section 19: everything the answer is actually allowed to draw
+        # numeric claims from — used only by the post-generation
+        # groundedness guard below, never sent to the model itself
+        # (that's `prompt`, built separately above).
+        grounding_text = "\n".join(
+            block for block in (document_context_block, memory_context_block, self._recent_user_answer_text or "", question_text) if block
         )
 
         self._active_answer_task = asyncio.create_task(
@@ -601,12 +708,14 @@ class ConversationOrchestrator:
                 is_draft_stream=is_draft_stream,
                 stabilized_at=stabilized_at or generation_request_start,
                 generation_request_start=generation_request_start,
+                grounding_text=grounding_text,
             )
         )
 
     async def _run_answer_generation(
         self, sequence: int, question_id: str, question_text: str, prompt: str, retrieved: list[RetrievedChunk],
         is_draft_stream: bool = False, stabilized_at: float = 0.0, generation_request_start: float = 0.0,
+        grounding_text: str = "",
     ) -> None:
         await self._emit_event(
             "answer.started",
@@ -685,6 +794,20 @@ class ConversationOrchestrator:
             )
             await self._finish_active_generation()
             return
+
+        # Section 19: a structured groundedness guard — never claim a
+        # numeric before/after change where both values are identical,
+        # and never state a specific percentage that appears nowhere in
+        # the real context this answer was allowed to draw from. Swaps
+        # in an honest "I don't have enough verified context" answer
+        # rather than ever showing a fabricated figure. Talking points
+        # are dropped too — they're generated from the same ungrounded
+        # pass and can't be trusted independently of the answer they
+        # were meant to support.
+        groundedness = check_answer_groundedness(parsed.short_answer, grounding_text)
+        if not groundedness.is_grounded:
+            logger.error("Answer failed groundedness check (%s); substituting a safe response", groundedness.reason)
+            parsed = ParsedAnswer(short_answer=safe_fallback_answer(), talking_points=[], caveat=parsed.caveat)
 
         completed_at = time.time()
         await self._emit_event(

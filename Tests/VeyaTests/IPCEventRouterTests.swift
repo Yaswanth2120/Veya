@@ -43,6 +43,24 @@ struct IPCEventRouterTests {
         #expect(state.segments.isEmpty)
     }
 
+    @Test("transcript.rejected increments the safe rejected-noise count only, never the transcript")
+    func transcriptRejected() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        let event = try makeEvent(
+            "transcript.rejected",
+            #"{"session_id":"\#(sessionID.uuidString)","reason":"transcript_rejected_non_speech_marker"}"#
+        )
+        await router.route(event)
+
+        #expect(state.rejectedTranscriptCount == 1)
+        #expect(state.segments.isEmpty)
+        #expect(state.partialTranscriptText == nil)
+    }
+
     @Test("transcript.final appends and persists a TranscriptSegment, clearing the partial text")
     func transcriptFinal() async throws {
         let sessionID = UUID()

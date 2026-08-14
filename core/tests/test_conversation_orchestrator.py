@@ -92,14 +92,15 @@ class PromptCapturingProvider:
     tests assert whether/how retrieved document context made it into the
     prompt without needing a real LLM."""
 
-    def __init__(self, deltas: list[str] = None):
+    def __init__(self, deltas: list[str] = None, delay: float = 0.0):
         self._deltas = deltas or ["ANSWER: ok\nPOINTS:\n- a point\n"]
+        self._delay = delay
         self.prompts: list[str] = []
 
     async def generate_stream(self, prompt, *, timeout):
         self.prompts.append(prompt)
         for delta in self._deltas:
-            await asyncio.sleep(0)
+            await asyncio.sleep(self._delay)
             yield delta
 
 
@@ -1143,5 +1144,291 @@ class TurnSchedulingRobustnessTests(unittest.IsolatedAsyncioTestCase):
         # untouched by the later failure — Swift's job is to keep
         # rendering it rather than overwrite it with the failure text.
         self.assertIn("The first answer, spoken naturally.", first_completed["answer_text"])
+
+        await orchestrator.close()
+
+
+class NoiseRejectionTests(unittest.IsolatedAsyncioTestCase):
+    """Section 19: non-speech markers and low-quality ASR garbage must
+    never create a candidate, a finalized question, a queue entry, or an
+    answer — and must never be remembered as conversation context."""
+
+    async def test_a_marker_only_turn_never_creates_a_question_or_answer(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ok"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "[BLANK_AUDIO]", 0.0, 2.0)
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(emitter.names(), ["transcript.rejected"])
+        rejected = next(data for name, data in emitter.events if name == "transcript.rejected")
+        self.assertEqual(rejected["reason"], "transcript_rejected_non_speech_marker")
+
+        await orchestrator.close()
+
+    async def test_mixed_noise_markers_never_create_a_question(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ok"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "(soft music) (wind blowing)", 0.0, 2.0)
+        await asyncio.sleep(0.05)
+
+        self.assertNotIn("question.finalized", emitter.names())
+        self.assertNotIn("answer.started", emitter.names())
+
+        await orchestrator.close()
+
+    async def test_a_valid_transcript_with_a_literal_non_marker_bracket_is_preserved(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: The config value was ten.\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "What was the config value (which defaults to ten) set to in production?", 0.0, 3.0)
+        completed = await emitter.wait_for_event("answer.completed")
+        self.assertFalse(completed["is_failed"])
+
+        await orchestrator.close()
+
+    async def test_repeated_asr_garbage_never_creates_a_question(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ok"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "the the the the the the the", 0.0, 2.0)
+        await asyncio.sleep(0.05)
+
+        self.assertNotIn("question.finalized", emitter.names())
+        rejected = next(data for name, data in emitter.events if name == "transcript.rejected")
+        self.assertEqual(rejected["reason"], "turn_rejected_low_quality")
+
+        await orchestrator.close()
+
+
+class CompoundQuestionTests(unittest.IsolatedAsyncioTestCase):
+    """Section 19: a compound interviewer question must remain exactly
+    one finalized turn/question/answer — a natural mid-question pause
+    (well under real VAD silence duration) must never be mistaken for
+    the end of the turn by the speculative-finalize debounce."""
+
+    async def test_a_pause_at_an_internal_conjunction_does_not_split_the_turn(self):
+        from unittest.mock import patch
+
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: The bottleneck was the DB, fixed by caching.\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        with patch("veya.conversation.orchestrator._SPECULATIVE_FINALIZE_DEBOUNCE_SECONDS", 0.05):
+            # First clause arrives, then a short pause — well under a
+            # real VAD silence boundary, but long enough to trip the
+            # (patched, fast) speculative-finalize debounce once.
+            await orchestrator.handle_final_transcript("What was the bottleneck, and", 0.0, 2.0)
+            await asyncio.sleep(0.08)
+            # No premature finalize — the dangling "and" must have
+            # deferred it.
+            self.assertNotIn("question.finalized", emitter.names())
+
+            await orchestrator.handle_final_transcript("how did you reduce the latency from 35% to 20%?", 2.0, 4.5)
+            await orchestrator.handle_turn_boundary(4.5)
+
+        completed = await emitter.wait_for_event("answer.completed")
+        self.assertFalse(completed["is_failed"])
+
+        finalized_events = [data for name, data in emitter.events if name == "question.finalized"]
+        self.assertEqual(len(finalized_events), 1)
+        self.assertIn("bottleneck", finalized_events[0]["text"])
+        self.assertIn("35%", finalized_events[0]["text"])
+        self.assertEqual([name for name, _ in emitter.events].count("answer.started"), 1)
+
+        await orchestrator.close()
+
+    async def test_compound_question_rabbitmq_example_remains_one_question(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: We failed over to the backup broker.\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(
+            orchestrator,
+            "What happened when RabbitMQ went down, and how did the system recover?",
+            0.0, 4.0,
+        )
+        await emitter.wait_for_event("answer.completed")
+
+        self.assertEqual(len([n for n in emitter.names() if n == "question.finalized"]), 1)
+        await orchestrator.close()
+
+    async def test_compound_question_project_role_example_remains_one_question(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: I led the project end to end.\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(
+            orchestrator,
+            "Tell me about the project, what your role was, and how you measured success.",
+            0.0, 4.0,
+        )
+        await emitter.wait_for_event("answer.completed")
+
+        self.assertEqual(len([n for n in emitter.names() if n == "question.finalized"]), 1)
+        await orchestrator.close()
+
+    async def test_compound_question_difficulty_example_remains_one_question(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: It was difficult because of the tight deadline.\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(
+            orchestrator,
+            "What was difficult, why was it difficult, and what did you do about it?",
+            0.0, 4.0,
+        )
+        await emitter.wait_for_event("answer.completed")
+
+        self.assertEqual(len([n for n in emitter.names() if n == "question.finalized"]), 1)
+        await orchestrator.close()
+
+    async def test_two_questions_separated_by_real_endpoint_silence_create_two_ordered_questions(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ok"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "Why did the migration take six weeks?", 0.0, 4.0)
+        await emitter.wait_for_event("answer.completed")
+        await finalize_turn(orchestrator, "What would you do differently next time?", 4.0, 8.0)
+        await emitter.wait_for_nth_event("answer.completed", 2)
+
+        finalized = [data["text"] for name, data in emitter.events if name == "question.finalized"]
+        self.assertEqual(len(finalized), 2)
+        self.assertIn("six weeks", finalized[0])
+        self.assertIn("differently", finalized[1])
+
+        await orchestrator.close()
+
+
+class AnswerContextIsolationTests(unittest.IsolatedAsyncioTestCase):
+    """Section 19: a queued turn's eventual answer prompt must reflect
+    only the conversation as of when *that* turn finalized — not other,
+    unrelated turns that finalized later while it was still waiting."""
+
+    async def test_a_queued_questions_prompt_excludes_a_later_unrelated_question_that_finalized_while_it_waited(self):
+        emitter = RecordingEmitter()
+        provider = PromptCapturingProvider(["ANSWER: ", "ok\n"], delay=0.05)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        # Q1 starts generating — deliberately slow, so Q2/Q3 both
+        # finalize while it's still active.
+        await finalize_turn(orchestrator, "Tell me about the RabbitMQ outage you mentioned.", 0.0, 2.0)
+        await emitter.wait_for_event("answer.started")
+
+        # Q2 finalizes while Q1 is still active — gets queued.
+        await finalize_turn(orchestrator, "What was your phone number for the on-call rotation?", 2.0, 4.0)
+        await emitter.wait_for_event("answer.queued")
+
+        # Q3 and Q4, both unrelated, also finalize while Q1 is still
+        # active and Q2 is still queued (queue depth 3, within the cap of
+        # 3) — Q4 finalizing *after* Q3 means naively excluding only the
+        # single most-recently-remembered fragment at dequeue time would
+        # still leave Q3's text contaminating Q2's prompt.
+        await finalize_turn(orchestrator, "How do you evaluate the YHANA project's success metrics?", 4.0, 6.0)
+        await finalize_turn(orchestrator, "What is your favorite pizza topping?", 6.0, 8.0)
+
+        await emitter.wait_for_event("answer.completed")  # Q1 completes
+        await emitter.wait_for_nth_event("answer.started", 2)  # Q2 dequeues and starts
+
+        self.assertEqual(len(provider.prompts), 2)
+        q2_prompt = provider.prompts[1]
+        # Q2's own prompt must never absorb Q3's or Q4's unrelated text
+        # just because they finalized while Q2 was waiting in queue.
+        self.assertNotIn("YHANA", q2_prompt)
+        self.assertNotIn("pizza", q2_prompt)
+        # Q1's text is legitimate prior context for Q2.
+        self.assertIn("RabbitMQ", q2_prompt)
+
+        await orchestrator.close()
+
+
+class GroundednessGuardIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Section 19: the numeric-contradiction/unsupported-claim guard,
+    exercised end-to-end through a real generation round."""
+
+    async def test_a_self_contradictory_percentage_never_reaches_the_completed_answer(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: We reduced it from 35% to 35% by caching.\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "How much did you reduce the latency by?", 0.0, 3.0)
+        completed = await emitter.wait_for_event("answer.completed")
+
+        self.assertFalse(completed["is_failed"])
+        self.assertNotIn("35% to 35%", completed["answer_text"])
+        self.assertEqual(completed["talking_points"], [])
+
+        await orchestrator.close()
+
+    async def test_an_unsupported_specific_percentage_is_replaced_with_a_safe_answer(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: We improved throughput by exactly 42% after the rewrite.\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "How much did throughput improve after the rewrite?", 0.0, 3.0)
+        completed = await emitter.wait_for_event("answer.completed")
+
+        self.assertNotIn("42%", completed["answer_text"])
+        self.assertIn("don't have enough verified", completed["answer_text"])
+
+        await orchestrator.close()
+
+    async def test_a_percentage_grounded_in_retrieved_document_context_is_not_flagged(self):
+        from veya.knowledge.models import RetrievedChunk, DocumentChunk
+
+        chunk = DocumentChunk(
+            chunk_id="c1", document_id="d1", session_id="s1", file_name="resume.txt", chunk_index=0,
+            text="Reduced latency from 35% to 20% via caching.", excerpt="Reduced latency from 35% to 20% via caching.",
+            char_start=0, char_end=10,
+        )
+
+        class _StubRetriever:
+            def build_context_block(self, retrieved):
+                return "Resume: Reduced latency from 35% to 20% via caching."
+
+            async def retrieve(self, session_id, query_text):
+                return [RetrievedChunk(chunk=chunk, score=1.0)]
+
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: We reduced latency from 35% to 20% via caching.\n"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider,
+            retriever=_StubRetriever(),
+        )
+
+        await finalize_turn(orchestrator, "How much did you reduce latency by?", 0.0, 3.0)
+        completed = await emitter.wait_for_event("answer.completed")
+
+        self.assertIn("35% to 20%", completed["answer_text"])
 
         await orchestrator.close()

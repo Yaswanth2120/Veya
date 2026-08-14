@@ -444,6 +444,13 @@ struct TranscriptPartialEventData: Decodable, Sendable {
     let speakerRole: SpeakerRole?
 }
 
+/// Section 19: a typed, safe rejection diagnostic — `reason` only, never
+/// the rejected text itself.
+struct TranscriptRejectedEventData: Decodable, Sendable {
+    let sessionId: String
+    let reason: String
+}
+
 struct TranscriptFinalEventData: Decodable, Sendable {
     let sessionId: String
     let id: String

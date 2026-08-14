@@ -41,6 +41,11 @@ final class ConversationState: ObservableObject {
     @Published private(set) var isGeneratingAnswer = false
     /// Transient (never persisted) partial answer text from `answer.delta`.
     @Published private(set) var partialAnswerText: String?
+    /// Section 19: a running count of `transcript.rejected` events this
+    /// session — noise/non-speech markers, low-quality ASR garbage, etc.
+    /// Never carries the rejected text itself, only a safe count for a
+    /// compact diagnostic ("N noise events filtered").
+    @Published private(set) var rejectedTranscriptCount = 0
 
     /// Section 14: the raw local-VAD-derived turn state — never claims
     /// AI understanding, only what the audio itself looks like right now.
@@ -342,6 +347,10 @@ final class ConversationState: ObservableObject {
 
     func setClassifyingQuestion(_ classifying: Bool) {
         isClassifyingQuestion = classifying
+    }
+
+    func recordTranscriptRejection() {
+        rejectedTranscriptCount += 1
     }
 
     func recordVADDiagnostic(_ sample: VADDiagnosticSample) {

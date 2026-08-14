@@ -98,6 +98,13 @@ final class IPCEventRouter {
             guard let data: TranscriptPartialEventData = decode(event, matching: \.sessionId) else { return }
             state.setPartialTranscript(data.text)
 
+        case "transcript.rejected":
+            // Section 19: a typed, safe diagnostic only — the reason
+            // string, never the rejected text itself. Drives a compact
+            // count in the UI, never raw content.
+            guard let _: TranscriptRejectedEventData = decode(event, matching: \.sessionId) else { return }
+            state.recordTranscriptRejection()
+
         case "turn.state":
             guard let data: TurnStateEventData = decode(event, matching: \.sessionId),
                   let turnState = ConversationState.TurnState(rawValue: data.state)

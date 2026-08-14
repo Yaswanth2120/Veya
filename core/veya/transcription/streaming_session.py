@@ -24,6 +24,7 @@ from typing import Awaitable, Callable, Optional
 
 from .streaming_provider import StreamingASRProvider
 from .turn_detection import TurnDetectionConfig, TurnSignal, VoiceActivityDetector
+from ..conversation.transcript_eligibility import TranscriptRejectionReason, classify_transcript_text
 from ..ipc import events
 from ..ipc.errors import ErrorCode, ProtocolError
 
@@ -150,6 +151,17 @@ class StreamingTranscriptionSession:
     async def _handle_hypothesis(self, hypothesis) -> None:  # ASRHypothesis, avoiding an import cycle in the signature
         text = hypothesis.text.strip()
         if not text:
+            return
+        # Section 19: the real streaming engine has no other filtering —
+        # this is the primary real-time transcription path, so this is
+        # exactly where "[BLANK_AUDIO]"/"(soft music)"/etc. would
+        # otherwise reach the transcript, question detection, and the
+        # answer prompt as if they were real speech.
+        rejection = classify_transcript_text(text)
+        if rejection != TranscriptRejectionReason.NONE:
+            await self._emit_event(
+                "transcript.rejected", events.transcript_rejected(session_id=self.session_id, reason=rejection.value)
+            )
             return
 
         if not hypothesis.is_final:

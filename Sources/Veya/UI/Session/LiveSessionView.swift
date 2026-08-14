@@ -81,8 +81,8 @@ struct LiveSessionView: View {
             switch self {
             case .listening: return "Listening"
             case .transcribing: return "Transcribing"
-            case .hearingQuestion: return "Hearing a question…"
-            case .waitingForSilence: return "Waiting for speaker to finish"
+            case .hearingQuestion: return "Hearing interviewer question…"
+            case .waitingForSilence: return "Waiting for interviewer to finish…"
             case .understanding: return "Understanding question"
             case .drafting: return "Drafting answer…"
             case .refining: return "Refining answer…"
@@ -142,6 +142,15 @@ struct LiveSessionView: View {
                     .font(.caption.bold())
                     .foregroundStyle(activeStep == .unavailable ? Color.orange : Color.accentColor)
                 Spacer()
+                if conversationState.rejectedTranscriptCount > 0 {
+                    Text("\(conversationState.rejectedTranscriptCount) noise event\(conversationState.rejectedTranscriptCount == 1 ? "" : "s") filtered")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if pythonIntelligenceCoordinator.drivingSource == .realTranscription {
+                audioModeIndicator
             }
 
             if isAnswerIntelligenceUnavailable {
@@ -421,10 +430,37 @@ struct LiveSessionView: View {
         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    /// Section 16: the mixed/microphone-only mode "I'm answering"
+    /// Section 19: `true` once Meeting Audio is actively capturing a
+    /// separated interviewer track — in that mode, the microphone track
+    /// is already reliably known to be the candidate (see
+    /// `ConversationOrchestrator._role_for_source`), so "I'm answering"
+    /// has nothing left to do; it's shown disabled/informational rather
+    /// than hidden outright, so it's clear *why* it's inert instead of
+    /// just missing.
+    private var isSeparatedAudioModeActive: Bool {
+        pythonIntelligenceCoordinator.meetingAudioActive
+    }
+
+    /// Section 19: the one honest, always-visible statement of what
+    /// Veya currently can and can't tell about who's speaking.
+    private var audioModeText: String {
+        isSeparatedAudioModeActive
+            ? "Separated interview audio — meeting audio is the interviewer, microphone is you"
+            : "Microphone-only — Veya cannot identify speakers automatically"
+    }
+
+    private var audioModeIndicator: some View {
+        Label(audioModeText, systemImage: isSeparatedAudioModeActive ? "checkmark.circle" : "questionmark.circle")
+            .font(.caption)
+            .foregroundStyle(isSeparatedAudioModeActive ? Color.secondary : Color.orange)
+    }
+
+    /// Section 16/19: the mixed/microphone-only mode "I'm answering"
     /// fallback control — a visible toggle alongside the ⌘⇧A hotkey,
     /// with an explicit disclosure that automatic speaker identity isn't
-    /// reliable outside separated-track mode.
+    /// reliable outside separated-track mode. Disabled/informational
+    /// once separated meeting audio is actually active, since it has
+    /// nothing left to do there.
     private var imAnsweringControl: some View {
         VStack(alignment: .leading, spacing: 6) {
             Toggle(isOn: Binding(
@@ -434,9 +470,16 @@ struct LiveSessionView: View {
                 Text("I'm answering").font(.caption.bold())
             }
             .toggleStyle(.switch)
-            Text("Hotkey: ⌘⇧A. Hold this on while you speak so your own voice isn't mistaken for an interviewer question — automatic speaker identity isn't reliable without separated meeting audio.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            .disabled(isSeparatedAudioModeActive)
+            if isSeparatedAudioModeActive {
+                Text("Not needed with separated meeting audio — your microphone is already known to be you.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Hotkey: ⌘⇧A. Hold this on while you speak so your own voice isn't mistaken for an interviewer question — automatic speaker identity isn't reliable without separated meeting audio.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(10)
         .background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))

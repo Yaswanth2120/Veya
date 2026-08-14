@@ -138,4 +138,13 @@ struct ConversationStateTests {
         // The already-persisted question itself is untouched.
         #expect(state.detectedQuestions.count == 1)
     }
+
+    @Test("recordTranscriptRejection increments a safe count only")
+    func recordTranscriptRejectionIncrementsCount() {
+        let state = makeState()
+        #expect(state.rejectedTranscriptCount == 0)
+        state.recordTranscriptRejection()
+        state.recordTranscriptRejection()
+        #expect(state.rejectedTranscriptCount == 2)
+    }
 }

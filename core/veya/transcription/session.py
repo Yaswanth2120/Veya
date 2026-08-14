@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import uuid
 from typing import Awaitable, Callable, Optional
 
@@ -24,24 +23,13 @@ from .engine import TranscriptionEngine
 from .overlap import dedupe_overlap
 from .rolling_buffer import RollingWindowBuffer, RollingWindowConfig
 from .turn_detection import TurnDetectionConfig, TurnSignal, VoiceActivityDetector
+from ..conversation.transcript_eligibility import TranscriptRejectionReason, classify_transcript_text
 from ..ipc import events
 from ..ipc.errors import ErrorCode, ProtocolError
 
 logger = logging.getLogger("veya.transcription")
 
 EmitEvent = Callable[[str, dict], Awaitable[None]]
-
-# whisper.cpp emits a bracketed/parenthesized tag instead of real words for
-# a non-speech window — "[BLANK_AUDIO]", "(silence)", "[SILENCE]",
-# "[ Music ]", etc. These are never real transcript content and must never
-# reach Swift/the user-facing history as if they were — matched only when
-# the *entire* stripped text is one such tag, so a real sentence that
-# merely contains a bracketed aside is never dropped.
-_NON_SPEECH_MARKER = re.compile(r"^[\[\(][^\]\)]*[\]\)]$")
-
-
-def _is_non_speech_marker(text: str) -> bool:
-    return bool(_NON_SPEECH_MARKER.fullmatch(text.strip()))
 
 
 class TranscriptionSession:
@@ -122,6 +110,14 @@ class TranscriptionSession:
         self._bytes_since_last_window = 0
         self._window_queue: "asyncio.Queue[tuple[bytes, float, float]]" = asyncio.Queue()
         self._consumer_task: asyncio.Task = asyncio.create_task(self._consume_windows())
+
+    async def _report_rejection(self, reason: TranscriptRejectionReason) -> None:
+        """Section 19: a typed, safe diagnostic only — never the rejected
+        text itself, never logged. Swift uses this to show a compact
+        rejected-noise count, never raw content."""
+        await self._emit_event(
+            "transcript.rejected", events.transcript_rejected(session_id=self.session_id, reason=reason.value)
+        )
 
     @staticmethod
     async def _default_run_blocking(fn: Callable[[], str]) -> str:
@@ -228,7 +224,10 @@ class TranscriptionSession:
             return
 
         text = raw_text.strip()
-        if not text or _is_non_speech_marker(text):
+        reason = classify_transcript_text(text)
+        if reason != TranscriptRejectionReason.NONE:
+            if text:
+                await self._report_rejection(reason)
             return
         await self._emit_event(
             "transcript.partial", events.transcript_partial(session_id=self.session_id, text=text, source=self._source),
@@ -246,7 +245,10 @@ class TranscriptionSession:
     async def _transcribe_and_emit(self, window: bytes, started_at: float, duration: float) -> None:
         raw_text = await self._run_blocking(lambda: self._engine.transcribe_pcm(window, self._buffer.sample_rate_hz))
         text = raw_text.strip()
-        if not text or _is_non_speech_marker(text):
+        reason = classify_transcript_text(text)
+        if reason != TranscriptRejectionReason.NONE:
+            if text:
+                await self._report_rejection(reason)
             return
 
         deduped = dedupe_overlap(self._previous_text, text)

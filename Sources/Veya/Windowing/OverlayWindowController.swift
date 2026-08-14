@@ -17,6 +17,7 @@ final class OverlayWindowController: NSWindowController {
 
     private static let frameAutosaveName = "VeyaOverlayPanel"
     private static let compactSize = NSSize(width: 380, height: 190)
+    private static let _hasMigratedCenteredOverlayKey = "VeyaOverlayCenteredDefaultMigrationApplied"
     private static let expandedSize = NSSize(width: 440, height: 440)
 
     init(
@@ -57,7 +58,8 @@ final class OverlayWindowController: NSWindowController {
         super.init(window: panel)
 
         panel.setFrameAutosaveName(Self.frameAutosaveName)
-        if !panel.setFrameUsingName(Self.frameAutosaveName) {
+        let restoredSavedFrame = panel.setFrameUsingName(Self.frameAutosaveName)
+        if !restoredSavedFrame {
             // A first launch with no saved position must not default to
             // screen-center — that's exactly where the main window (and
             // its in-app answer panel) sits, so a centered overlay would
@@ -65,15 +67,22 @@ final class OverlayWindowController: NSWindowController {
             // to a corner instead keeps the overlay non-obstructive by
             // default; the user can still drag it anywhere afterward,
             // and that position is what gets saved/restored from then on.
-            if let visibleFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
-                let margin: CGFloat = 24
-                let origin = NSPoint(
-                    x: visibleFrame.maxX - initialSize.width - margin,
-                    y: visibleFrame.minY + margin
-                )
-                panel.setFrameOrigin(origin)
-            } else {
-                panel.center()
+            Self.positionAtDefaultCorner(panel, size: initialSize)
+        } else if let screenFrame = panel.screen?.frame ?? NSScreen.main?.frame,
+                  OverlayCornerPositioning.looksCentered(panel.frame, in: screenFrame) {
+            // Section 19: a user who launched Veya before the corner-
+            // default fix existed has a *saved* centered position from
+            // back then — `setFrameUsingName` above successfully
+            // restored it, so the "no saved position" branch above never
+            // runs for them, and they'd otherwise keep getting a
+            // centered, main-window-obstructing overlay forever. Applied
+            // at most once per install (`_hasMigratedCenteredOverlayKey`)
+            // so a user who *deliberately* drags the overlay back near
+            // center later is never fought.
+            let defaults = UserDefaults.standard
+            if !defaults.bool(forKey: Self._hasMigratedCenteredOverlayKey) {
+                Self.positionAtDefaultCorner(panel, size: panel.frame.size)
+                defaults.set(true, forKey: Self._hasMigratedCenteredOverlayKey)
             }
         }
 
@@ -84,6 +93,14 @@ final class OverlayWindowController: NSWindowController {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    private static func positionAtDefaultCorner(_ panel: NSPanel, size: NSSize) {
+        guard let visibleFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame else {
+            panel.center()
+            return
+        }
+        panel.setFrameOrigin(OverlayCornerPositioning.cornerOrigin(forPanelSize: size, in: visibleFrame))
     }
 
     /// Exposes the managed panel read-only so other subsystems (Presenter

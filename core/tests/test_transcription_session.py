@@ -118,12 +118,14 @@ class TranscriptionSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(emitter.events, [])
 
-    async def test_non_speech_markers_emit_no_event_and_never_reach_swift(self):
+    async def test_non_speech_markers_emit_no_transcript_event_and_never_reach_swift(self):
         # whisper.cpp emits a bracketed tag instead of real words for
         # silent/non-speech windows — these must never surface in
         # Swift/the user-facing history as if they were real transcript
         # content (a review finding: raw "[BLANK_AUDIO]" markers were
-        # visible in Previous Sessions).
+        # visible in Previous Sessions). Section 19: a safe, typed
+        # `transcript.rejected` diagnostic (reason only, never the text)
+        # is emitted instead of nothing.
         for marker in ("[BLANK_AUDIO]", "(silence)", "[SILENCE]", "[ Music ]", "[ Applause ]"):
             with self.subTest(marker=marker):
                 engine = FakeEngine([marker])
@@ -138,7 +140,9 @@ class TranscriptionSessionTests(unittest.IsolatedAsyncioTestCase):
                 await session.handle_chunk(0, 0.0, 4.0, make_pcm(800))
                 await session.close()
 
-                self.assertEqual(emitter.events, [])
+                self.assertEqual([name for name, _ in emitter.events if name.startswith("transcript.")], ["transcript.rejected"])
+                rejected_data = next(data for name, data in emitter.events if name == "transcript.rejected")
+                self.assertEqual(rejected_data["reason"], "transcript_rejected_non_speech_marker")
 
     async def test_a_sentence_containing_a_bracketed_aside_is_not_treated_as_a_marker(self):
         # Only a window whose *entire* text is one bracketed/parenthesized
