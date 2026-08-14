@@ -152,7 +152,7 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         names = emitter.names()
         self.assertIn("question.detected", names)
         self.assertIn("answer.started", names)
-        self.assertIn("answer.delta", names)
+        self.assertIn("answer.speakable_delta", names)
         self.assertEqual(names[-1], "answer.completed")
         # A strong prompt like this drafts speculatively before the turn
         # even finalizes (Section 15) — finalize then finds the draft's
@@ -166,7 +166,7 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(question_data["confidence"], 0.6)
         self.assertIn("question_id", question_data)
 
-        answer_events = [data for name, data in emitter.events if name in ("answer.started", "answer.delta", "answer.completed")]
+        answer_events = [data for name, data in emitter.events if name in ("answer.started", "answer.speakable_delta", "answer.completed")]
         sequences = {data["sequence"] for data in answer_events}
         self.assertEqual(sequences, {1})
 
@@ -521,7 +521,7 @@ class PartialTranscriptDrivenDraftingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("answer.draft_started", names)
         self.assertNotIn("question.detected", names)
         self.assertNotIn("question.finalized", names)
-        await emitter.wait_for_event("answer.draft_delta")
+        await emitter.wait_for_event("answer.speakable_draft_delta")
         await orchestrator.close()
 
     async def test_walk_me_through_your_resume_also_drafts_from_a_partial_alone(self):
@@ -1053,12 +1053,12 @@ class TurnSchedulingRobustnessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await finalize_turn(orchestrator, "Tell me about yourself.", 0.0, 2.0)
-        await emitter.wait_for_event("answer.delta")
+        await emitter.wait_for_event("answer.speakable_delta")
         await emitter.wait_for_event("answer.completed")
         # The delta must have arrived strictly before completion, not
         # merely both eventually present in the event log.
         names = emitter.names()
-        self.assertLess(names.index("answer.delta"), names.index("answer.completed"))
+        self.assertLess(names.index("answer.speakable_delta"), names.index("answer.completed"))
 
         await orchestrator.close()
 
@@ -1106,8 +1106,8 @@ class TurnSchedulingRobustnessTests(unittest.IsolatedAsyncioTestCase):
         timing = await emitter.wait_for_event("answer.timing")
 
         self.assertLessEqual(timing["stabilized_at"], timing["generation_request_start"])
-        self.assertLessEqual(timing["generation_request_start"], timing["first_token_at"])
-        self.assertLessEqual(timing["first_token_at"], timing["completed_at"])
+        self.assertLessEqual(timing["generation_request_start"], timing["first_speakable_char_at"])
+        self.assertLessEqual(timing["first_speakable_char_at"], timing["completed_at"])
 
         await orchestrator.close()
 

@@ -42,6 +42,17 @@ struct OverlayView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if conversationState.isAnswerSlow {
+                // Retry/Skip controls live on the main Answer panel
+                // (which is always primary/available — see
+                // `LiveSessionView`); this compact overlay only mirrors
+                // the same status so it's never left showing a silent,
+                // unexplained spinner.
+                Label("Local model is taking longer than expected…", systemImage: "clock.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
             // A completed answer is never hidden just because a newer
             // round is in flight — the in-flight content is shown above
             // it instead, same as the main app's Answer panel.

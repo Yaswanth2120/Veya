@@ -83,14 +83,25 @@ final class ConversationState: ObservableObject {
         let id = UUID()
         let stabilizedAt: Date
         let generationRequestStart: Date
-        let firstTokenAt: Date?
+        /// Diagnostics only — may correspond to hidden reasoning content,
+        /// never rendered as an answer. Never shown as "first visible
+        /// answer" — see `firstSpeakableCharAt`/`firstRenderedAt` for that.
+        let firstRawTokenAt: Date?
+        /// Section 18: the first character of clean, candidate-speakable
+        /// prose on the Python side.
+        let firstSpeakableCharAt: Date?
+        /// Captured client-side, the moment Swift actually applied the
+        /// first `answer.speakable_delta` to visible state — the real
+        /// "first usable answer" moment as the user would experience it.
+        let firstRenderedAt: Date?
         let completedAt: Date?
-        /// Seconds from the question stabilizing to the first visible
-        /// token — the "first useful text" latency the build prompt asks
-        /// to track.
-        var firstTokenLatencySeconds: Double? {
-            guard let firstTokenAt else { return nil }
-            return firstTokenAt.timeIntervalSince(stabilizedAt)
+        var firstSpeakableLatencySeconds: Double? {
+            guard let firstSpeakableCharAt else { return nil }
+            return firstSpeakableCharAt.timeIntervalSince(stabilizedAt)
+        }
+        var firstRenderedLatencySeconds: Double? {
+            guard let firstRenderedAt else { return nil }
+            return firstRenderedAt.timeIntervalSince(stabilizedAt)
         }
         var totalLatencySeconds: Double? {
             guard let completedAt else { return nil }
@@ -99,12 +110,36 @@ final class ConversationState: ObservableObject {
     }
     @Published private(set) var answerTimingSamples: [AnswerTimingSample] = []
     private static let maxRetainedAnswerTimingSamples = 50
+    /// The moment Swift actually applied the first speakable delta for a
+    /// given answer-round sequence — captured client-side so
+    /// `firstRenderedAt` reflects real render timing, not just when
+    /// Python sent the event. Cleared once matched into a recorded
+    /// `AnswerTimingSample` (or when it can never be, e.g. diagnostics
+    /// were off) to avoid growing unbounded across a long session.
+    private var pendingFirstRenderAt: [Int: Date] = [:]
+
+    /// Called by `IPCEventRouter` alongside every `appendPartialAnswerDelta`/
+    /// `appendDraftDelta` — records the real client-side render moment
+    /// once per sequence, a no-op for every subsequent delta in that
+    /// same round.
+    func noteFirstRenderIfNeeded(sequence: Int) {
+        if pendingFirstRenderAt[sequence] == nil {
+            pendingFirstRenderAt[sequence] = Date()
+        }
+    }
 
     func recordAnswerTiming(_ sample: AnswerTimingSample) {
         answerTimingSamples.append(sample)
         if answerTimingSamples.count > Self.maxRetainedAnswerTimingSamples {
             answerTimingSamples.removeFirst(answerTimingSamples.count - Self.maxRetainedAnswerTimingSamples)
         }
+    }
+
+    /// Consumes (removes) the pending render timestamp for `sequence`,
+    /// if one was recorded — used once, when the matching `answer.timing`
+    /// event arrives.
+    func takeFirstRenderTimestamp(sequence: Int) -> Date? {
+        pendingFirstRenderAt.removeValue(forKey: sequence)
     }
 
     /// Section 15: the evolving "is this an answer request, and how sure
@@ -159,6 +194,18 @@ final class ConversationState: ObservableObject {
     /// question could not be queued — an honest "this won't be answered"
     /// notice rather than a silent drop.
     @Published private(set) var queueOverflowMessage: String?
+    /// Section 18: no clean speakable text has arrived yet after a
+    /// bounded wait (`answer.slow_warning`) — the panel must keep
+    /// showing the prior completed answer and offer Retry/Skip rather
+    /// than a silent, indefinite spinner. Cleared as soon as real
+    /// speakable text starts arriving or the round ends.
+    @Published private(set) var isAnswerSlow = false
+    /// The question_id/text of whatever answer round is currently active
+    /// (drafting or generating) — lets the slow-warning banner's Retry
+    /// control resend the exact same question rather than needing a
+    /// separate, redundant tracking mechanism.
+    @Published private(set) var activeGeneratingQuestionID: String?
+    @Published private(set) var activeGeneratingQuestionText: String?
 
     // MARK: - Developer diagnostics (safe metadata only — see
     // `VADDiagnosticsView`; never transcript/prompt/answer text)
@@ -311,12 +358,14 @@ final class ConversationState: ObservableObject {
         try? await repository.save(question)
     }
 
-    func setAnswerGenerating(_ generating: Bool) {
+    func setAnswerGenerating(_ generating: Bool, questionID: String? = nil, questionText: String? = nil) {
         isGeneratingAnswer = generating
         if generating {
             isAnalyzingQuestion = false
             partialAnswerText = nil
             lastAnswerFailureMessage = nil
+            activeGeneratingQuestionID = questionID
+            activeGeneratingQuestionText = questionText
         }
     }
 
@@ -334,8 +383,19 @@ final class ConversationState: ObservableObject {
         resetCandidateTracking()
     }
 
-    func setPartialAnswer(_ text: String?) {
-        partialAnswerText = text
+    /// Section 18: appends a clean `answer.speakable_delta` chunk — the
+    /// growing answer text, not a replacement of it. (Previously this
+    /// overwrote `partialAnswerText` with only the latest raw chunk each
+    /// call, so the panel would visibly jump/flicker instead of growing;
+    /// every chunk Python now sends here is already clean speakable
+    /// prose, never raw reasoning.)
+    func appendPartialAnswerDelta(_ delta: String) {
+        partialAnswerText = (partialAnswerText ?? "") + delta
+        isAnswerSlow = false
+    }
+
+    func setAnswerSlow(_ slow: Bool) {
+        isAnswerSlow = slow
     }
 
     func ingestAnswer(_ answer: CopilotAnswer) async {
@@ -403,12 +463,15 @@ final class ConversationState: ObservableObject {
     /// `isReplacement`: `true` for `answer.draft_replaced`, `false` for
     /// `answer.draft_started` — a replacement after the turn already
     /// finalized is a refinement pass, not a fresh speculative draft.
-    func beginDraftAnswer(sequence: Int, isReplacement: Bool) {
+    func beginDraftAnswer(sequence: Int, isReplacement: Bool, questionID: String? = nil) {
         draftSequence = sequence
         draftAnswerText = ""
         isDraftingAnswer = true
         isRefiningAnswer = isReplacement && candidateState == .finalized
         lastDraftTransitionReason = isReplacement ? .replaced : .started
+        isAnswerSlow = false
+        activeGeneratingQuestionID = questionID
+        activeGeneratingQuestionText = finalizedQuestionText ?? candidateQuestionText
         if candidateState != .finalized {
             candidateState = .drafting
         }
@@ -417,6 +480,7 @@ final class ConversationState: ObservableObject {
     func appendDraftDelta(_ delta: String, sequence: Int) {
         guard sequence == draftSequence else { return }  // stale/superseded — never mutate current state
         draftAnswerText += delta
+        isAnswerSlow = false
     }
 
     func cancelDraftAnswer(sequence: Int) {
@@ -441,6 +505,9 @@ final class ConversationState: ObservableObject {
         draftAnswerText = ""
         draftSequence = nil
         candidateRevisionCount = 0
+        isAnswerSlow = false
+        activeGeneratingQuestionID = nil
+        activeGeneratingQuestionText = nil
     }
 
     // MARK: - Shared

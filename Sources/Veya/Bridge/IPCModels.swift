@@ -581,6 +581,15 @@ struct AnswerDequeuedEventData: Decodable, Sendable {
     let queueDepth: Int
 }
 
+/// Section 18: no clean speakable text has arrived yet after a bounded
+/// wait — Swift shows "Local model is taking longer than expected" plus
+/// Retry/Skip while keeping the prior completed answer visible.
+struct AnswerSlowWarningEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let sequence: Int
+}
+
 /// Section 17: raw epoch-second latency timestamps for one answer round
 /// — only emitted when the worker was launched with
 /// `VEYA_ANSWER_TIMING_DIAGNOSTICS=1`. Diagnostics-only; never shown in
@@ -588,9 +597,15 @@ struct AnswerDequeuedEventData: Decodable, Sendable {
 struct AnswerTimingEventData: Decodable, Sendable {
     let sessionId: String
     let questionId: String
+    let sequence: Int
     let stabilizedAt: Double
     let generationRequestStart: Double
-    let firstTokenAt: Double?
+    /// Diagnostics only — may correspond to hidden reasoning content,
+    /// never rendered as an answer.
+    let firstRawTokenAt: Double?
+    /// Section 18: the real "first usable answer" moment on the Python
+    /// side — the first character of clean, candidate-speakable prose.
+    let firstSpeakableCharAt: Double?
     let completedAt: Double?
 }
 

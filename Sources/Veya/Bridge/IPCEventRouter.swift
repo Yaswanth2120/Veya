@@ -139,15 +139,20 @@ final class IPCEventRouter {
 
         case "answer.draft_started":
             guard let data: AnswerDraftStartedEventData = decode(event, matching: \.sessionId) else { return }
-            state.beginDraftAnswer(sequence: data.sequence, isReplacement: false)
+            state.beginDraftAnswer(sequence: data.sequence, isReplacement: false, questionID: data.questionId)
 
         case "answer.draft_replaced":
             guard let data: AnswerDraftReplacedEventData = decode(event, matching: \.sessionId) else { return }
-            state.beginDraftAnswer(sequence: data.sequence, isReplacement: true)
+            state.beginDraftAnswer(sequence: data.sequence, isReplacement: true, questionID: data.questionId)
 
-        case "answer.draft_delta":
+        case "answer.speakable_draft_delta":
+            // Section 18: the only draft-delta event Swift renders — a
+            // legacy raw `answer.draft_delta` (if one ever arrived, e.g.
+            // from an older worker) is deliberately not handled here, so
+            // it can never render unfiltered model output.
             guard let data: AnswerDraftDeltaEventData = decode(event, matching: \.sessionId) else { return }
             state.appendDraftDelta(data.delta, sequence: data.sequence)
+            state.noteFirstRenderIfNeeded(sequence: data.sequence)
 
         case "answer.cancelled":
             guard let data: AnswerCancelledEventData = decode(event, matching: \.sessionId) else { return }
@@ -184,13 +189,25 @@ final class IPCEventRouter {
             // answer…" for something already superseded.
             guard currentAnswerSequence == nil || data.sequence > currentAnswerSequence! else { return }
             currentAnswerSequence = data.sequence
-            state.setAnswerGenerating(true)
+            state.setAnswerGenerating(true, questionID: data.questionId, questionText: state.finalizedQuestionText ?? state.candidateQuestionText)
 
-        case "answer.delta":
+        case "answer.speakable_delta":
+            // Section 18: the only delta-content event Swift renders — a
+            // legacy raw `answer.delta` is deliberately not handled
+            // here, so it can never render unfiltered model output
+            // (reasoning tokens, protocol labels) in the main panel or
+            // overlay.
             guard let data: AnswerDeltaEventData = decode(event, matching: \.sessionId),
                   data.sequence == currentAnswerSequence
             else { return }
-            state.setPartialAnswer(data.delta)
+            state.appendPartialAnswerDelta(data.delta)
+            state.noteFirstRenderIfNeeded(sequence: data.sequence)
+
+        case "answer.slow_warning":
+            guard let data: AnswerSlowWarningEventData = decode(event, matching: \.sessionId),
+                  data.sequence == currentAnswerSequence
+            else { return }
+            state.setAnswerSlow(true)
 
         case "answer.queued":
             guard let data: AnswerQueuedEventData = decode(event, matching: \.sessionId) else { return }
@@ -210,7 +227,9 @@ final class IPCEventRouter {
                 ConversationState.AnswerTimingSample(
                     stabilizedAt: Date(timeIntervalSince1970: data.stabilizedAt),
                     generationRequestStart: Date(timeIntervalSince1970: data.generationRequestStart),
-                    firstTokenAt: data.firstTokenAt.map { Date(timeIntervalSince1970: $0) },
+                    firstRawTokenAt: data.firstRawTokenAt.map { Date(timeIntervalSince1970: $0) },
+                    firstSpeakableCharAt: data.firstSpeakableCharAt.map { Date(timeIntervalSince1970: $0) },
+                    firstRenderedAt: state.takeFirstRenderTimestamp(sequence: data.sequence),
                     completedAt: data.completedAt.map { Date(timeIntervalSince1970: $0) }
                 )
             )

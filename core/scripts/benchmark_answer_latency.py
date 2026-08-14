@@ -11,15 +11,22 @@ mock/fake-timed benchmark.
 Usage:
     python3 core/scripts/benchmark_answer_latency.py [--runs N] [--model NAME]
 
-Reports median and p95 for:
-  - time to first visible token (stabilized question -> first LLM delta)
-  - total time to completion (stabilized question -> answer.completed)
+Reports median and p95 for three distinct measurements (Section 18 —
+raw model activity is never conflated with a real usable answer):
+  - first raw provider token (diagnostics only — may be hidden reasoning,
+    e.g. a `<think>` block; never what a user would consider an answer)
+  - first usable answer: the first clean, speakable character
+    `SpeakableAnswerStream` actually emits — this is the real
+    "first visible answer" number
+  - total completion (stabilized question -> answer.completed)
 
-This does not simulate microphone/VAD/turn-assembly latency — it starts
-the clock at the same point the real orchestrator does (`stabilized_at`,
-right after a turn is classified as an answer request), which is what
-`_start_answer_generation` already measures from in production when
-`VEYA_ANSWER_TIMING_DIAGNOSTICS=1`.
+This does not simulate microphone/VAD/turn-assembly latency, and it does
+not include Swift's own render time (a separate, client-side
+measurement — see `ConversationState.AnswerTimingSample.firstRenderedAt`)
+— it starts the clock at the same point the real orchestrator does
+(`stabilized_at`, right after a turn is classified as an answer
+request), which is what `_start_answer_generation` already measures
+from in production when `VEYA_ANSWER_TIMING_DIAGNOSTICS=1`.
 """
 
 from __future__ import annotations
@@ -115,12 +122,21 @@ async def _run_one(provider: OllamaProvider, question: str) -> dict:
 
     await orchestrator.handle_final_transcript(question, 0.0, 2.0)
     await orchestrator.handle_turn_boundary(2.0)
-    await asyncio.wait_for(done.wait(), timeout=60.0)
+    await asyncio.wait_for(done.wait(), timeout=90.0)
     await orchestrator.close()
 
-    first_token_latency = timing["first_token_at"] - timing["stabilized_at"] if timing.get("first_token_at") else None
-    total_latency = timing["completed_at"] - timing["stabilized_at"] if timing.get("completed_at") else None
-    return {"question": question, "first_token_latency": first_token_latency, "total_latency": total_latency}
+    stabilized_at = timing.get("stabilized_at")
+
+    def _latency(key: str) -> float:
+        value = timing.get(key)
+        return (value - stabilized_at) if value and stabilized_at else None
+
+    return {
+        "question": question,
+        "raw_token_latency": _latency("first_raw_token_at"),
+        "usable_answer_latency": _latency("first_speakable_char_at"),
+        "total_latency": _latency("completed_at"),
+    }
 
 
 def _percentile(values: list[float], pct: float) -> float:
@@ -148,30 +164,43 @@ async def main() -> int:
 
     print(f"Model: {config.model}   Ollama: {config.base_url}   Runs per question: {args.runs}\n")
 
-    first_token_latencies: list[float] = []
+    raw_token_latencies: list[float] = []
+    usable_answer_latencies: list[float] = []
     total_latencies: list[float] = []
 
     for question in FIXTURE_QUESTIONS:
         for run in range(args.runs):
             result = await _run_one(provider, question)
-            ft = result["first_token_latency"]
+            rt = result["raw_token_latency"]
+            ut = result["usable_answer_latency"]
             tt = result["total_latency"]
-            if ft is not None:
-                first_token_latencies.append(ft)
+            if rt is not None:
+                raw_token_latencies.append(rt)
+            if ut is not None:
+                usable_answer_latencies.append(ut)
             if tt is not None:
                 total_latencies.append(tt)
-            print(f"  [{question[:40]:<40}] run {run + 1}/{args.runs}: first_token={ft:.2f}s total={tt:.2f}s" if ft and tt else f"  [{question}] run {run + 1}: FAILED (no timing captured)")
+            if ut is not None and tt is not None:
+                print(f"  [{question[:40]:<40}] run {run + 1}/{args.runs}: raw_token={rt:.2f}s usable_answer={ut:.2f}s total={tt:.2f}s")
+            else:
+                print(f"  [{question[:40]:<40}] run {run + 1}/{args.runs}: FAILED (no usable answer text produced)")
 
-    if not first_token_latencies:
+    if not usable_answer_latencies:
         print("\nNo successful runs — nothing to report.")
         return 1
 
     print("\n--- Results ---")
-    print(f"First-visible-answer latency (stabilized question -> first token):")
-    print(f"  median: {statistics.median(first_token_latencies):.2f}s   p95: {_percentile(first_token_latencies, 95):.2f}s")
-    print(f"Total completion latency (stabilized question -> answer.completed):")
+    print("Raw first provider token (diagnostics only — may be hidden reasoning, never an answer):")
+    if raw_token_latencies:
+        print(f"  median: {statistics.median(raw_token_latencies):.2f}s   p95: {_percentile(raw_token_latencies, 95):.2f}s")
+    else:
+        print("  (no raw tokens captured)")
+    print("First USABLE answer (first clean, speakable character — the real 'first visible answer'):")
+    print(f"  median: {statistics.median(usable_answer_latencies):.2f}s   p95: {_percentile(usable_answer_latencies, 95):.2f}s")
+    print("Total completion (stabilized question -> answer.completed):")
     print(f"  median: {statistics.median(total_latencies):.2f}s   p95: {_percentile(total_latencies, 95):.2f}s")
-    print(f"\nSample size: {len(first_token_latencies)} runs across {len(FIXTURE_QUESTIONS)} fixed questions.")
+    print(f"\nSample size: {len(usable_answer_latencies)} successful runs across {len(FIXTURE_QUESTIONS)} fixed questions.")
+    print("(Does not include Swift's own render time — a separate, client-side measurement.)")
     return 0
 
 

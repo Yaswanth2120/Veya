@@ -101,7 +101,7 @@ struct IPCEventRouterTests {
         #expect(state.isGeneratingAnswer == true)
     }
 
-    @Test("answer.delta sets the transient partial-answer text")
+    @Test("answer.speakable_delta sets the transient partial-answer text")
     func answerDelta() async throws {
         let sessionID = UUID()
         let (state, _) = await makeState(sessionID: sessionID)
@@ -114,12 +114,102 @@ struct IPCEventRouterTests {
             try makeEvent("answer.started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
         )
         let event = try makeEvent(
-            "answer.delta",
+            "answer.speakable_delta",
             #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"Staged rollout","sequence":1}"#
         )
         await router.route(event)
 
         #expect(state.partialAnswerText == "Staged rollout")
+    }
+
+    @Test("consecutive answer.speakable_delta events accumulate, not replace")
+    func answerSpeakableDeltaAccumulates() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent(
+                "answer.speakable_delta",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"I led the ","sequence":1}"#
+            )
+        )
+        await router.route(
+            try makeEvent(
+                "answer.speakable_delta",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"migration.","sequence":1}"#
+            )
+        )
+
+        #expect(state.partialAnswerText == "I led the migration.")
+    }
+
+    @Test("a raw answer.delta event (legacy/unfiltered) is never rendered — only answer.speakable_delta updates visible text")
+    func rawAnswerDeltaIsIgnored() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent(
+                "answer.delta",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"<think>hidden reasoning</think>","sequence":1}"#
+            )
+        )
+
+        #expect(state.partialAnswerText == nil)
+    }
+
+    @Test("a raw answer.draft_delta event (legacy/unfiltered) is never rendered — only answer.speakable_draft_delta updates the draft")
+    func rawAnswerDraftDeltaIsIgnored() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.draft_started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent(
+                "answer.draft_delta",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"<think>hidden</think>","sequence":1}"#
+            )
+        )
+
+        #expect(state.draftAnswerText == "")
+    }
+
+    @Test("answer.slow_warning sets isAnswerSlow, cleared by the next speakable delta")
+    func answerSlowWarningRouting() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        await router.route(
+            try makeEvent("answer.slow_warning", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        #expect(state.isAnswerSlow == true)
+
+        await router.route(
+            try makeEvent(
+                "answer.speakable_delta",
+                #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"Finally, an answer.","sequence":1}"#
+            )
+        )
+        #expect(state.isAnswerSlow == false)
     }
 
     @Test("a delta with a stale sequence is dropped")
@@ -135,7 +225,7 @@ struct IPCEventRouterTests {
         // Sequence 1 is stale relative to the already-current sequence 2
         // (e.g. a late event from a question that was superseded).
         let staleEvent = try makeEvent(
-            "answer.delta",
+            "answer.speakable_delta",
             #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"stale","sequence":1}"#
         )
         await router.route(staleEvent)
@@ -160,7 +250,7 @@ struct IPCEventRouterTests {
         // state associated with the current (sequence 2) round.
         await router.route(
             try makeEvent(
-                "answer.delta",
+                "answer.speakable_delta",
                 #"{"session_id":"\#(sessionID.uuidString)","question_id":"q2","delta":"still going","sequence":2}"#
             )
         )
@@ -173,7 +263,7 @@ struct IPCEventRouterTests {
         let sessionID = UUID()
         let (state, _) = await makeState(sessionID: sessionID)
         state.setAnswerGenerating(true)
-        state.setPartialAnswer("partial")
+        state.appendPartialAnswerDelta("partial")
         let router = IPCEventRouter()
         router.attach(state: state, sessionID: sessionID)
 
@@ -352,7 +442,7 @@ struct IPCEventRouterTests {
         #expect(state.candidateState == .drafting)
     }
 
-    @Test("answer.draft_delta appends to draftAnswerText only for the matching sequence")
+    @Test("answer.speakable_draft_delta appends to draftAnswerText only for the matching sequence")
     func answerDraftDeltaRouting() async throws {
         let sessionID = UUID()
         let (state, _) = await makeState(sessionID: sessionID)
@@ -364,13 +454,13 @@ struct IPCEventRouterTests {
         )
         await router.route(
             try makeEvent(
-                "answer.draft_delta",
+                "answer.speakable_draft_delta",
                 #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"I am ","sequence":1}"#
             )
         )
         await router.route(
             try makeEvent(
-                "answer.draft_delta",
+                "answer.speakable_draft_delta",
                 #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"a backend engineer.","sequence":1}"#
             )
         )
@@ -378,7 +468,7 @@ struct IPCEventRouterTests {
         // mutate the currently-visible draft text.
         await router.route(
             try makeEvent(
-                "answer.draft_delta",
+                "answer.speakable_draft_delta",
                 #"{"session_id":"\#(sessionID.uuidString)","question_id":"stale","delta":"SHOULD NOT APPEAR","sequence":0}"#
             )
         )
@@ -397,7 +487,7 @@ struct IPCEventRouterTests {
             try makeEvent("answer.draft_started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
         )
         await router.route(
-            try makeEvent("answer.draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"stale content","sequence":1}"#)
+            try makeEvent("answer.speakable_draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"stale content","sequence":1}"#)
         )
         await router.route(
             try makeEvent("answer.draft_replaced", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q2","sequence":2}"#)
@@ -409,12 +499,12 @@ struct IPCEventRouterTests {
 
         // The old sequence's delta arriving late must not resurrect it.
         await router.route(
-            try makeEvent("answer.draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"late stale delta","sequence":1}"#)
+            try makeEvent("answer.speakable_draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","delta":"late stale delta","sequence":1}"#)
         )
         #expect(state.draftAnswerText == "")
 
         await router.route(
-            try makeEvent("answer.draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q2","delta":"fresh content","sequence":2}"#)
+            try makeEvent("answer.speakable_draft_delta", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q2","delta":"fresh content","sequence":2}"#)
         )
         #expect(state.draftAnswerText == "fresh content")
     }

@@ -10,15 +10,17 @@ from __future__ import annotations
 
 from .models import SessionContext
 
-_RESPONSE_FORMAT_INSTRUCTIONS = """Respond in exactly this format, with no extra commentary before or after:
+_RESPONSE_FORMAT_INSTRUCTIONS = """Answer as the candidate, speaking directly to the interviewer — first person, out loud, right now. Do not think out loud, show your reasoning, or plan before answering; begin speaking your response immediately.
 
-ANSWER: <a natural, speakable answer — the way a person would actually say it out loud in an interview, several sentences if the question warrants it. Not a clipped one-liner, and never just a label for the points below.>
+Respond in exactly this format, with no extra commentary before or after, and nothing before the ANSWER line — no "Here is an answer", "Based on your resume", "Certainly", "Sure", or any other preamble:
+
+ANSWER: <the natural, speakable answer, starting with the first real word of what the candidate would say — several sentences if the question warrants it, never a clipped one-liner and never just a label for the points below. No bullets, no markdown headings, no citations or source excerpts inside this line.>
 POINTS:
 - <an optional supporting detail, only if it adds something the natural answer didn't already cover>
 - <another optional supporting detail>
 CAVEAT: <a brief caveat or clarifying assumption, or "none">
 
-The ANSWER line is the primary content and must stand on its own as something a person could say aloud verbatim — never a rigid list of fragments, and never just a topic label. POINTS is genuinely optional expandable detail, not a restatement of the answer; leave it as just "POINTS:" with no bullets if nothing further is useful. Do not invent citations, sources, or documents. If you are not certain, say so in the caveat rather than fabricating specifics."""
+The ANSWER line is the primary content and must stand on its own as something a person could say aloud verbatim — never a rigid list of fragments, and never just a topic label. POINTS is genuinely optional expandable detail, not a restatement of the answer; leave it as just "POINTS:" with no bullets if nothing further is useful. Do not invent citations, sources, or documents. Never invent experience, employers, metrics, projects, or technologies not present in the context above. If you are not certain, say so in the caveat rather than fabricating specifics."""
 
 _GROUNDED_INSTRUCTIONS = """Use the supporting context above only for claims specific to the user's documents — do not treat it as ground truth for anything else, and do not quote or cite it beyond what's needed to answer. If your answer would conflict with the supporting context, say so explicitly in the caveat rather than picking one silently."""
 

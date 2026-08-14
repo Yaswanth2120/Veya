@@ -187,6 +187,10 @@ struct LiveSessionView: View {
                 answerFailureBanner(failureMessage)
             }
 
+            if conversationState.isAnswerSlow {
+                slowAnswerBanner
+            }
+
             // A completed answer is always shown once one exists — it is
             // never hidden just because a newer round (candidate, draft,
             // refinement, or generation) is in flight; the in-flight
@@ -237,6 +241,37 @@ struct LiveSessionView: View {
                 }
                 Button("Dismiss") { conversationState.dismissAnswerFailure() }
                     .font(.caption)
+            }
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// Section 18: no clean speakable text has arrived yet after a
+    /// bounded wait — never a silent, indefinite spinner. The previous
+    /// completed answer (shown separately below) and the interviewer
+    /// queue are both left untouched; Skip/Retry are the only way past
+    /// this, never automatic.
+    private var slowAnswerBanner: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Local model is taking longer than expected…", systemImage: "clock.badge.exclamationmark")
+                .font(.callout)
+                .foregroundStyle(.orange)
+            HStack {
+                if let questionID = conversationState.activeGeneratingQuestionID,
+                   let questionText = conversationState.activeGeneratingQuestionText {
+                    Button("Retry") {
+                        Task {
+                            await pythonIntelligenceCoordinator.skipActiveAnswer()
+                            await pythonIntelligenceCoordinator.retryFailedAnswer(questionID: questionID, questionText: questionText)
+                        }
+                    }
+                    .font(.caption)
+                }
+                Button("Skip") {
+                    Task { await pythonIntelligenceCoordinator.skipActiveAnswer() }
+                }
+                .font(.caption)
             }
         }
         .padding(10)

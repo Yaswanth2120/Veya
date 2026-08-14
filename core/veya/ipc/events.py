@@ -81,6 +81,34 @@ def answer_delta(session_id: str, question_id: str, delta: str, sequence: int = 
     return {"session_id": session_id, "question_id": question_id, "delta": delta, "sequence": sequence}
 
 
+# MARK: - Clean speakable-answer streaming (Section 18)
+#
+# `answer_delta`/`answer_draft_delta` above carry the provider's raw
+# output (may include `<think>` blocks, format labels, or other
+# non-speakable text) and are never sent over the wire anymore — see
+# `ConversationOrchestrator._run_answer_generation`. `answer.speakable_delta`
+# is the only delta-content event Swift should render: clean, candidate
+# prose only, already stripped of reasoning blocks and protocol labels
+# by `SpeakableAnswerStream`.
+
+
+def answer_speakable_delta(session_id: str, question_id: str, delta: str, sequence: int = 1) -> dict:
+    return {"session_id": session_id, "question_id": question_id, "delta": delta, "sequence": sequence}
+
+
+def answer_speakable_draft_delta(session_id: str, question_id: str, delta: str, sequence: int = 1) -> dict:
+    return {"session_id": session_id, "question_id": question_id, "delta": delta, "sequence": sequence}
+
+
+def answer_slow_warning(session_id: str, question_id: str, sequence: int = 1) -> dict:
+    """No clean speakable text has arrived yet after a bounded wait
+    (`_FIRST_USABLE_TEXT_WARNING_SECONDS`) — the generation may still be
+    reasoning or the model may just be slow. Swift shows "Local model is
+    taking longer than expected" plus Retry/Skip, while keeping the prior
+    completed answer visible and the queue intact."""
+    return {"session_id": session_id, "question_id": question_id, "sequence": sequence}
+
+
 def answer_completed(
     session_id: str,
     question_id: str,
@@ -169,17 +197,25 @@ def answer_timing(
     question_id: str,
     stabilized_at: float,
     generation_request_start: float,
-    first_token_at: Optional[float],
+    first_raw_token_at: Optional[float],
+    first_speakable_char_at: Optional[float],
     sequence: int = 1,
     completed_at: Optional[float] = None,
 ) -> dict:
+    """`first_raw_token_at` (diagnostics only — may correspond to hidden
+    reasoning content, never rendered) vs. `first_speakable_char_at`
+    (Section 18: the real "first usable answer" moment — the first
+    character of clean, candidate-speakable prose). Swift's own render
+    timestamp is captured client-side when it actually applies the first
+    `answer.speakable_delta`, not sent from here."""
     return {
         "session_id": session_id,
         "question_id": question_id,
         "sequence": sequence,
         "stabilized_at": stabilized_at,
         "generation_request_start": generation_request_start,
-        "first_token_at": first_token_at,
+        "first_raw_token_at": first_raw_token_at,
+        "first_speakable_char_at": first_speakable_char_at,
         "completed_at": completed_at,
     }
 

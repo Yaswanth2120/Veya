@@ -10,9 +10,10 @@ unchanged, same as any other `async for` loop.
 from __future__ import annotations
 
 import re
-from typing import Awaitable, Callable, List
+from typing import Awaitable, Callable, List, Optional
 
 from .models import ParsedAnswer
+from .speakable_stream import SpeakableAnswerStream
 from ..llm.provider import LLMProvider
 
 DEFAULT_GENERATION_TIMEOUT_SECONDS = 30.0
@@ -93,17 +94,28 @@ async def generate_answer(
     provider: LLMProvider,
     prompt: str,
     *,
-    on_delta: Callable[[str], Awaitable[None]],
+    on_speakable_delta: Callable[[str], Awaitable[None]],
+    on_raw_delta: Optional[Callable[[str], Awaitable[None]]] = None,
     timeout: float = DEFAULT_GENERATION_TIMEOUT_SECONDS,
 ) -> ParsedAnswer:
-    """Streams `prompt` through `provider`, calling `on_delta` for every
-    chunk (raw growing text, matching the existing partial-answer preview
-    behavior from the mock pipeline), then parses the fully-accumulated
-    response. Lets `LLMTimeoutError`/`LLMProviderError`/`LLMUnavailableError`
+    """Streams `prompt` through `provider`, running every raw chunk
+    through a `SpeakableAnswerStream` (Section 18) — `on_speakable_delta`
+    only ever receives clean, speakable prose (never `<think>` content,
+    the `ANSWER:`/`POINTS:`/`CAVEAT:` labels, or the `POINTS:`/`CAVEAT:`
+    sections themselves). `on_raw_delta`, if given, receives the
+    provider's raw chunks unchanged — callers must never render this in
+    normal UI; it exists only for optional, metadata-scale diagnostics
+    (see `ConversationOrchestrator`). The final `ParsedAnswer` is parsed
+    from the stream's accumulated *clean* text, so `answer.completed`
+    and the live speakable stream are always built from the exact same
+    source. Lets `LLMTimeoutError`/`LLMProviderError`/`LLMUnavailableError`
     and `asyncio.CancelledError` propagate unchanged — this function adds
     no error handling of its own, only accumulation + parsing."""
-    accumulated: List[str] = []
+    stream = SpeakableAnswerStream()
     async for delta in provider.generate_stream(prompt, timeout=timeout):
-        accumulated.append(delta)
-        await on_delta(delta)
-    return parse_answer_text("".join(accumulated))
+        if on_raw_delta is not None:
+            await on_raw_delta(delta)
+        speakable = stream.feed(delta)
+        if speakable:
+            await on_speakable_delta(speakable)
+    return parse_answer_text(stream.clean_text())

@@ -39,6 +39,17 @@ class RenderPromptTests(unittest.TestCase):
         prompt = render_prompt(SessionContext(), "Any question?")
         self.assertIn("Do not invent citations, sources, or documents.", prompt)
 
+    def test_instructs_no_preamble_and_direct_first_person_speech(self):
+        prompt = render_prompt(SessionContext(), "Tell me about yourself.")
+        self.assertIn("no extra commentary before or after", prompt)
+        self.assertIn("Here is an answer", prompt)  # named as a forbidden example
+        self.assertIn("Do not think out loud", prompt)
+        self.assertIn("first person", prompt)
+
+    def test_instructs_never_inventing_experience_or_employers(self):
+        prompt = render_prompt(SessionContext(), "Tell me about yourself.")
+        self.assertIn("Never invent experience, employers, metrics, projects, or technologies", prompt)
+
     def test_user_answer_block_appears_distinctly_and_is_labeled_authoritative(self):
         # Section 16: a follow-up interviewer question must ground itself
         # in what the user actually said — this is the dedicated field

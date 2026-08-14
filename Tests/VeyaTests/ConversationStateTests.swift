@@ -128,7 +128,7 @@ struct ConversationStateTests {
         let question = DetectedQuestion(id: UUID(), sessionID: sessionID, text: "Why?", detectedAt: Date())
         await state.ingestDetectedQuestion(question)
         state.setAnswerGenerating(true)
-        state.setPartialAnswer("partial text")
+        state.appendPartialAnswerDelta("partial text")
 
         state.cancelPendingAnswerActivity()
 

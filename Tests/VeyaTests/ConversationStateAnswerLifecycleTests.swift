@@ -46,7 +46,7 @@ struct ConversationStateAnswerLifecycleTests {
     func streamedDeltaIsVisibleImmediately() {
         let state = makeState()
         state.setAnswerGenerating(true)
-        state.setPartialAnswer("The pipeline was optimized")
+        state.appendPartialAnswerDelta("The pipeline was optimized")
         #expect(state.partialAnswerText == "The pipeline was optimized")
     }
 

@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import queue
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -32,6 +33,30 @@ DEFAULT_OLLAMA_MODEL = "llama3.2"
 _LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
 
 _STREAM_DONE = object()
+
+# Section 18: Ollama's `/api/generate` accepts a `"think": false` request
+# field (added for reasoning models like qwen3) that skips the reasoning
+# pass entirely — measured locally as the difference between ~4-5s and
+# ~0.3-0.8s to the first real answer token for qwen3:1.7b. Only sent to
+# Ollama instances confirmed to be new enough (see `_supports_think_param`);
+# older Ollama servers silently ignoring or rejecting an unknown field is
+# not assumed, it's detected via a real version check plus a real
+# fallback below.
+_MIN_THINK_PARAM_VERSION = (0, 9, 0)
+
+
+def _parse_ollama_version(version_string: str) -> Optional[tuple]:
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version_string.strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _supports_think_param(version_string: str) -> bool:
+    parsed = _parse_ollama_version(version_string)
+    if parsed is None:
+        return False
+    return parsed >= _MIN_THINK_PARAM_VERSION
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -70,6 +95,14 @@ class OllamaProvider:
 
     def __init__(self, config: Optional[OllamaConfig] = None) -> None:
         self._config = config or OllamaConfig.resolve_from_env()
+        # Determined once, lazily, on this provider's first generation
+        # call — never re-checked per question (a fresh `OllamaProvider`
+        # is already constructed once per session, matching
+        # `check_availability()`'s existing once-per-session granularity).
+        # `None` = not yet determined, `True`/`False` = detected (or a
+        # request already proved unsupported — see the fallback in
+        # `generate_stream`).
+        self._think_param_supported: Optional[bool] = None
 
     async def describe_status(self) -> dict:
         """Never raises — a diagnostic for Swift's Local AI status panel,
@@ -146,19 +179,57 @@ class OllamaProvider:
         if self._config.model not in names and f"{self._config.model}:latest" not in names:
             raise LLMUnavailableError("The configured Ollama model is not available locally.")
 
+    def _detect_think_param_support_blocking(self) -> bool:
+        """A real version check against `/api/version`, not an assumption
+        — an unreachable/malformed response is treated as unsupported
+        (the safe default: no `think` field sent at all)."""
+        request = urllib.request.Request(f"{self._config.base_url}/api/version", method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self._config.connect_timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        version = payload.get("version") if isinstance(payload, dict) else None
+        if not isinstance(version, str):
+            return False
+        return _supports_think_param(version)
+
+    def _post_generate_blocking(self, prompt: str, timeout: float, include_think_false: bool):
+        request_body = {"model": self._config.model, "prompt": prompt, "stream": True}
+        if include_think_false:
+            request_body["think"] = False
+        request = urllib.request.Request(
+            f"{self._config.base_url}/api/generate",
+            data=json.dumps(request_body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        return urllib.request.urlopen(request, timeout=timeout)
+
     async def generate_stream(self, prompt: str, *, timeout: float) -> AsyncIterator[str]:
         loop = asyncio.get_running_loop()
         chunk_queue: "queue.Queue[object]" = queue.Queue()
 
         def produce() -> None:
+            if self._think_param_supported is None:
+                self._think_param_supported = self._detect_think_param_support_blocking()
+
+            include_think_false = self._think_param_supported
             try:
-                request = urllib.request.Request(
-                    f"{self._config.base_url}/api/generate",
-                    data=json.dumps({"model": self._config.model, "prompt": prompt, "stream": True}).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(request, timeout=timeout) as response:
+                try:
+                    response_cm = self._post_generate_blocking(prompt, timeout, include_think_false)
+                except urllib.error.HTTPError:
+                    # A real, observed rejection of the `think` field (not
+                    # assumed) — fall back to a plain request once, and
+                    # remember not to send it again for this provider
+                    # instance (this session), matching "reuse the
+                    # existing client, don't re-probe every question."
+                    if not include_think_false:
+                        raise
+                    self._think_param_supported = False
+                    response_cm = self._post_generate_blocking(prompt, timeout, False)
+
+                with response_cm as response:
                     for raw_line in response:
                         line = raw_line.decode("utf-8").strip()
                         if not line:

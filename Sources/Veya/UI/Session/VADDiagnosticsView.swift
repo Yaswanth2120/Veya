@@ -60,10 +60,15 @@ struct VADDiagnosticsView: View {
 
     private func timingRow(for sample: ConversationState.AnswerTimingSample) -> some View {
         HStack(spacing: 8) {
-            Text("first token")
+            Text("usable")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text(sample.firstTokenLatencySeconds.map { String(format: "%.2fs", $0) } ?? "—")
+            Text(sample.firstSpeakableLatencySeconds.map { String(format: "%.2fs", $0) } ?? "—")
+                .font(.caption2.monospaced())
+            Text("rendered")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(sample.firstRenderedLatencySeconds.map { String(format: "%.2fs", $0) } ?? "—")
                 .font(.caption2.monospaced())
             Text("total")
                 .font(.caption2)

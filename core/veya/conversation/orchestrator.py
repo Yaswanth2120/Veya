@@ -37,6 +37,13 @@ logger = logging.getLogger("veya.conversation")
 EmitEvent = Callable[[str, dict], Awaitable[None]]
 
 _GENERATION_FAILED_MESSAGE = "Answer generation failed — the local LLM provider became unavailable mid-response."
+_NO_USABLE_TEXT_MESSAGE = "Answer generation finished without producing any speakable answer text."
+# Section 18: how long to wait after a generation starts before warning
+# that no clean, speakable text has arrived yet (a slow/reasoning model
+# is still an honest "taking longer than expected", not a silent hang).
+# Well under `DEFAULT_GENERATION_TIMEOUT_SECONDS` — this is a UX warning,
+# not the point generation is abandoned.
+_FIRST_USABLE_TEXT_WARNING_SECONDS = 6.0
 _MAX_RECENT_TRANSCRIPT_CHARACTERS = 2_400
 # Bounds how long `close()` waits for a still-in-flight answer (including
 # one just started by a trailing turn flushed at session end) before
@@ -606,38 +613,76 @@ class ConversationOrchestrator:
             events.answer_started(session_id=self.session_id, sequence=sequence, question_id=question_id),
         )
 
-        first_token_at: list[float] = []
+        first_raw_token_at: list[float] = []
+        first_speakable_char_at: list[float] = []
 
-        async def on_delta(delta: str) -> None:
-            if not first_token_at:
-                first_token_at.append(time.time())
+        async def on_raw_delta(delta: str) -> None:
+            # Diagnostics timing only — raw content (which may include
+            # hidden reasoning) is never emitted over the wire, logged,
+            # or persisted. See `SpeakableAnswerStream`/`generate_answer`.
+            if not first_raw_token_at:
+                first_raw_token_at.append(time.time())
+
+        async def on_speakable_delta(delta: str) -> None:
+            if not first_speakable_char_at:
+                first_speakable_char_at.append(time.time())
+                warning_task.cancel()
             await self._emit_event(
-                "answer.delta",
-                events.answer_delta(
-                    session_id=self.session_id, sequence=sequence, question_id=question_id, delta=delta
-                ),
+                "answer.speakable_delta",
+                events.answer_speakable_delta(session_id=self.session_id, sequence=sequence, question_id=question_id, delta=delta),
             )
             if is_draft_stream:
                 await self._emit_event(
-                    "answer.draft_delta",
-                    events.answer_draft_delta(session_id=self.session_id, sequence=sequence, question_id=question_id, delta=delta),
+                    "answer.speakable_draft_delta",
+                    events.answer_speakable_draft_delta(session_id=self.session_id, sequence=sequence, question_id=question_id, delta=delta),
                 )
 
+        async def warn_if_slow() -> None:
+            try:
+                await asyncio.sleep(_FIRST_USABLE_TEXT_WARNING_SECONDS)
+            except asyncio.CancelledError:
+                return
+            await self._emit_event(
+                "answer.slow_warning",
+                events.answer_slow_warning(session_id=self.session_id, sequence=sequence, question_id=question_id),
+            )
+
+        warning_task = asyncio.create_task(warn_if_slow())
+
         try:
-            parsed = await generate_answer(self._llm_provider, prompt, on_delta=on_delta)
+            parsed = await generate_answer(
+                self._llm_provider, prompt, on_speakable_delta=on_speakable_delta, on_raw_delta=on_raw_delta
+            )
         except asyncio.CancelledError:
             # Superseded by a same-turn replace (see `_start_answer_generation`)
             # — the caller that cancelled us already owns `_active_answer_task`
             # and any dequeue decision; this task must never touch either.
+            warning_task.cancel()
             raise
         except LLMError as exc:
+            warning_task.cancel()
             logger.error("Unhandled %s during answer generation", type(exc).__name__)
             await self._emit_generation_failed(sequence=sequence, question_id=question_id, question_text=question_text)
             await self._finish_active_generation()
             return
         except Exception as exc:  # noqa: BLE001 - never let a raw exception escape, never log its message
+            warning_task.cancel()
             logger.error("Unhandled %s during answer generation", type(exc).__name__)
             await self._emit_generation_failed(sequence=sequence, question_id=question_id, question_text=question_text)
+            await self._finish_active_generation()
+            return
+
+        warning_task.cancel()
+
+        if not parsed.short_answer and not parsed.talking_points:
+            # The model produced no usable speakable text at all (e.g. an
+            # unclosed reasoning block swallowed everything, or a
+            # provider that returned only whitespace) — an honest,
+            # retryable failure, never a blank/empty "completed" answer.
+            logger.error("Generation completed with no usable answer text")
+            await self._emit_generation_failed(
+                sequence=sequence, question_id=question_id, question_text=question_text, message=_NO_USABLE_TEXT_MESSAGE
+            )
             await self._finish_active_generation()
             return
 
@@ -661,7 +706,8 @@ class ConversationOrchestrator:
                 events.answer_timing(
                     session_id=self.session_id, sequence=sequence, question_id=question_id,
                     stabilized_at=stabilized_at, generation_request_start=generation_request_start,
-                    first_token_at=first_token_at[0] if first_token_at else None,
+                    first_raw_token_at=first_raw_token_at[0] if first_raw_token_at else None,
+                    first_speakable_char_at=first_speakable_char_at[0] if first_speakable_char_at else None,
                     completed_at=completed_at,
                 ),
             )
@@ -677,7 +723,9 @@ class ConversationOrchestrator:
         self._active_answer_task = None
         await self._start_next_queued_turn_if_any()
 
-    async def _emit_generation_failed(self, sequence: int, question_id: str, question_text: str) -> None:
+    async def _emit_generation_failed(
+        self, sequence: int, question_id: str, question_text: str, message: str = _GENERATION_FAILED_MESSAGE
+    ) -> None:
         # `answer.completed` (with `is_failed=True`) is still the one way
         # a generation round always ends, success or not, so streaming
         # Swift state never hangs on "Generating answer…" forever — but
@@ -691,7 +739,7 @@ class ConversationOrchestrator:
                 sequence=sequence,
                 question_id=question_id,
                 question=question_text,
-                answer_text=_GENERATION_FAILED_MESSAGE,
+                answer_text=message,
                 talking_points=[],
                 sources=[],
                 caveat="",

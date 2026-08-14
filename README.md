@@ -1,8 +1,28 @@
 # Veya
 
-Veya is a native macOS real-time conversation copilot. It listens locally (real microphone capture + local Whisper transcription), detects questions, and generates grounded answers with a local LLM (Ollama) — with a coding copilot, a system-design copilot, session reports, and durable user-approved memory, all running on-device. There are no cloud APIs anywhere in this app: transcription, retrieval, embeddings, and generation are all local by default, and the loopback-only policy is enforced in code, not just by convention.
+Veya is a native macOS **Interview Copilot**. It listens locally, transcribes microphone or opted-in meeting audio, detects interviewer questions, retrieves relevant resume/job-description/personal context, and streams a natural first-person answer for the candidate to say aloud.
+
+The app uses local Whisper transcription and a local Ollama model for retrieval and answer generation. Ollama is loopback-only by default. The packaged app may download a selected Whisper model from Hugging Face on first launch, verifies its SHA-256, then caches it locally for offline use.
 
 Swift/SwiftUI (AppKit-hosted) owns the UI, all session/transcript/question/answer persistence (GRDB/SQLite), and process lifecycle. A local Python worker (`core/veya`) is spawned as a subprocess and communicates over a versioned JSON Lines protocol on stdin/stdout; it owns only *derived* data — transcription, LLM calls, the knowledge/embedding index, coding/design workspace state, and durable approved memory — never the source-of-truth session data.
+
+## Current product scope
+
+The active Create Session experience is intentionally **interview-only**. New sessions are created as `Interview Practice`; historic non-interview sessions remain readable for compatibility but are not presented as choices for new sessions.
+
+1. Upload and label a **Resume** (required by default), **Job Description** (optional), and supporting documents.
+2. Veya indexes them locally and waits at **Preparing Interview Context**. Normal start is enabled only after required documents are ready; failure requires an explicit override.
+3. During the interview, Veya streams a speakable answer based on the question, indexed documents, approved memory, previous conversation, and the candidate's own previously spoken answer.
+4. In microphone-only mode, use **I'm answering** / `⌘⇧A` while the candidate speaks. This stores that speech as authoritative personal context and prevents it from becoming a new interviewer question.
+5. For separated tracks, opt in to **Meeting Audio** during a live session, grant Screen Recording permission, and select the meeting application. This is intended for Zoom, Meet, or Teams, but real-platform capture is still a manual verification requirement.
+
+### Current limitations
+
+- The microphone-only flow cannot reliably identify speakers automatically; the candidate must use **I'm answering** when speaking.
+- Interviewer-turn scheduling is bounded: active answers are preserved and up to three later questions are queued rather than cancelling an answer. Queue overflow is shown explicitly.
+- Answer text is streamed through a clean-speech filter (`SpeakableAnswerStream`) that strips `<think>`/reasoning blocks and protocol labels before anything reaches Swift, and Ollama is asked to skip its reasoning pass outright (`think: false`, version-gated with a real fallback) when the connected Ollama instance supports it. Measured against the currently configured local model (`qwen3:1.7b`) on this machine: median first *usable* (clean, speakable) answer text was **0.25s**, p95 **3.63s** (the p95 outlier was model/Ollama warm-up on the first request of a run, not steady-state); median total completion was **4.43s**, p95 **7.35s**. These are real measurements from `core/scripts/benchmark_answer_latency.py`, not targets — re-run it locally to reproduce on your own hardware/model.
+- Physical microphone, Zoom, Google Meet, and Teams capture have not yet been manually verified end-to-end.
+- The coding and system-design subsystems remain in the repository but are not part of the current Create Session product flow.
 
 ## What's implemented
 
@@ -33,7 +53,7 @@ Replaces the old "judge every ~4s Whisper window independently" question detecti
   - Real audio → first `transcript.partial`: **~955ms** (real `jfk.wav` sample through real `whisper.cpp`, real-time chunk pacing, `core/tests/test_realtime_pipeline_latency_smoke.py`).
   - Real audio → first `transcript.final`: **~3958ms** — the dominant cost, bounded below by the ~4s Whisper rolling-window size itself; a VAD turn boundary can fire earlier (e.g. ~1.5s) but the transcript text for that turn does not exist until the window completes.
   - Finalized turn → `question.detected`: **~0.2ms** — pure local computation, but this leg only starts once a transcript exists, so it is dwarfed by the audio→transcript leg above; text is injected directly in this measurement, not spoken (`core/tests/test_ollama_smoke.py`).
-  - `question.detected` → first `answer.delta`: **~2.0s** (real local Ollama generation, `qwen3:1.7b`).
+  - `question.detected` → first `answer.speakable_delta`: **~2.0s** at the time of this measurement (real local Ollama generation, `qwen3:1.7b`) — since superseded by the `think:false`/clean-stream work below; see "Current limitations" for current numbers.
   - All figures measured on this development machine; environment/hardware-specific, not a benchmark claim. **End-to-end microphone → first answer content is dominated by the ~4s transcription window, not by classification or generation** — "real-time / low-latency" should be read as "faster turn *boundary* detection than before," not as sub-second answer latency.
 - **Known limitation, not fixed**: there is no diarization or speaker-role model. VAD is energy-based (speech/silence only) and cannot tell the interviewer's speech from the candidate's own speech — Veya can still attempt to answer the candidate's own speech if it resembles a prompt. This is an acknowledged gap, not a silent one.
 
@@ -111,6 +131,14 @@ open .build/package/Veya.app     # or right-click > Open — it's unsigned
 
 ## Testing
 
-- **Python**: 321 tests (`python3 -m unittest discover -s core/tests -t core`), 3 skipped by default (they require a real local Ollama).
-- **Swift**: 167 tests across 23 suites (`./run-tests.sh`), including a real-subprocess integration suite that launches the actual `core/veya` worker (no mocks) to verify IPC, coding/design/report/memory RPCs, crash-restart recovery, session deletion cascade, Local AI status, turn-state routing, and knowledge ingestion end-to-end.
-- Several suites opportunistically exercise real local Whisper/Ollama when `VEYA_WHISPER_BIN`/`VEYA_WHISPER_MODEL`/`VEYA_OLLAMA_URL`/`VEYA_OLLAMA_MODEL` are set, and are skipped otherwise — they never run against a mock standing in for a real local model.
+- **Python**: 433 tests, with no `ResourceWarning`s under `-W error::ResourceWarning`; four opt-in real-model/manual suites are skipped by default.
+- **Swift**: 216 tests across the Swift test suites.
+- The suite covers IPC, transcription lifecycle, answer queueing/failure preservation, document-readiness gating, memory, reports, and real-worker subprocess flows. It does **not** substitute for physical microphone or meeting-platform acceptance testing.
+- Run the checks with:
+
+```sh
+python3 -W error::ResourceWarning -m unittest discover -s core/tests
+swift build
+./run-tests.sh
+packaging/build_app.sh
+```

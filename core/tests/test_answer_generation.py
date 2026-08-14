@@ -100,36 +100,64 @@ class FakeProvider:
 
 
 class GenerateAnswerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_deltas_are_delivered_in_order_and_accumulated_for_parsing(self):
+    async def test_speakable_deltas_are_clean_and_accumulated_for_parsing(self):
         provider = FakeProvider(["ANSWER: Hi", ".\nPOINTS:\n", "- a point\n"])
         received = []
 
-        async def on_delta(delta):
+        async def on_speakable_delta(delta):
             received.append(delta)
 
-        parsed = await generate_answer(provider, "prompt", on_delta=on_delta)
+        parsed = await generate_answer(provider, "prompt", on_speakable_delta=on_speakable_delta)
 
-        self.assertEqual(received, ["ANSWER: Hi", ".\nPOINTS:\n", "- a point\n"])
+        # Only clean, speakable prose — never the "ANSWER:" label or the
+        # POINTS: section content.
+        self.assertEqual("".join(received), "Hi.\n")
         self.assertEqual(parsed.short_answer, "Hi.")
         self.assertEqual(parsed.talking_points, ["a point"])
+
+    async def test_on_raw_delta_receives_the_providers_unfiltered_chunks(self):
+        provider = FakeProvider(["<think>hmm</think>ANSWER: Hi.\n"])
+        raw_received = []
+        speakable_received = []
+
+        async def on_raw_delta(delta):
+            raw_received.append(delta)
+
+        async def on_speakable_delta(delta):
+            speakable_received.append(delta)
+
+        await generate_answer(provider, "prompt", on_speakable_delta=on_speakable_delta, on_raw_delta=on_raw_delta)
+
+        self.assertEqual("".join(raw_received), "<think>hmm</think>ANSWER: Hi.\n")
+        self.assertNotIn("think", "".join(speakable_received))
+        self.assertEqual("".join(speakable_received), "Hi.\n")
+
+    async def test_on_raw_delta_is_optional(self):
+        provider = FakeProvider(["ANSWER: Hi.\n"])
+
+        async def on_speakable_delta(delta):
+            pass
+
+        # Must not raise just because on_raw_delta was omitted.
+        await generate_answer(provider, "prompt", on_speakable_delta=on_speakable_delta)
 
     async def test_provider_error_propagates_to_the_caller(self):
         provider = FakeProvider(["partial"], error=LLMProviderError("boom"))
 
-        async def on_delta(delta):
+        async def on_speakable_delta(delta):
             pass
 
         with self.assertRaises(LLMProviderError):
-            await generate_answer(provider, "prompt", on_delta=on_delta)
+            await generate_answer(provider, "prompt", on_speakable_delta=on_speakable_delta)
 
     async def test_provider_timeout_propagates_to_the_caller(self):
         provider = FakeProvider([], error=LLMTimeoutError("timed out"))
 
-        async def on_delta(delta):
+        async def on_speakable_delta(delta):
             pass
 
         with self.assertRaises(LLMTimeoutError):
-            await generate_answer(provider, "prompt", on_delta=on_delta)
+            await generate_answer(provider, "prompt", on_speakable_delta=on_speakable_delta)
 
     async def test_cancellation_stops_delivering_deltas(self):
         received = []
@@ -140,10 +168,10 @@ class GenerateAnswerTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0.01)
                     yield f"chunk-{i}"
 
-        async def on_delta(delta):
+        async def on_speakable_delta(delta):
             received.append(delta)
 
-        task = asyncio.create_task(generate_answer(SlowProvider(), "prompt", on_delta=on_delta))
+        task = asyncio.create_task(generate_answer(SlowProvider(), "prompt", on_speakable_delta=on_speakable_delta))
         await asyncio.sleep(0.05)
         task.cancel()
 

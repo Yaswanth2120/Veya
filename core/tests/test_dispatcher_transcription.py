@@ -438,7 +438,7 @@ class RealStreamingEventChainTests(unittest.IsolatedAsyncioTestCase):
     chain (only the ASR subprocess itself is a small fake binary, not a
     mocked Python class) and asserts the actual required event order:
     transcript.partial -> question.candidate -> answer.draft_started ->
-    answer.draft_delta, with no `transcript.final`/VAD boundary involved
+    answer.speakable_draft_delta, with no `transcript.final`/VAD boundary involved
     at any point."""
 
     async def test_a_strong_partial_alone_produces_the_full_draft_event_chain(self):
@@ -478,24 +478,24 @@ class RealStreamingEventChainTests(unittest.IsolatedAsyncioTestCase):
                 names_at = lambda: [name for name, _ in emitter.events]  # noqa: E731
 
                 deadline = asyncio.get_event_loop().time() + 5.0
-                while "answer.draft_delta" not in names_at() and asyncio.get_event_loop().time() < deadline:
+                while "answer.speakable_draft_delta" not in names_at() and asyncio.get_event_loop().time() < deadline:
                     await asyncio.sleep(0.02)
 
                 names = names_at()
                 self.assertIn("transcript.partial", names)
                 self.assertIn("question.candidate", names)
                 self.assertIn("answer.draft_started", names)
-                self.assertIn("answer.draft_delta", names)
+                self.assertIn("answer.speakable_draft_delta", names)
 
                 # The exact required ordering, ignoring interleaved
                 # unrelated events (turn.state, etc.).
-                relevant = [n for n in names if n in ("transcript.partial", "question.candidate", "answer.draft_started", "answer.draft_delta")]
+                relevant = [n for n in names if n in ("transcript.partial", "question.candidate", "answer.draft_started", "answer.speakable_draft_delta")]
                 self.assertEqual(relevant.index("transcript.partial") < relevant.index("question.candidate"), True)
                 self.assertEqual(relevant.index("question.candidate") < relevant.index("answer.draft_started"), True)
-                self.assertEqual(relevant.index("answer.draft_started") < relevant.index("answer.draft_delta"), True)
+                self.assertEqual(relevant.index("answer.draft_started") < relevant.index("answer.speakable_draft_delta"), True)
 
                 # No `transcript.final`/VAD boundary was needed for any of this.
-                self.assertNotIn("transcript.final", names[: names.index("answer.draft_delta") + 1])
+                self.assertNotIn("transcript.final", names[: names.index("answer.speakable_draft_delta") + 1])
 
                 await context.close_transcription_session_if_running()
             finally:
