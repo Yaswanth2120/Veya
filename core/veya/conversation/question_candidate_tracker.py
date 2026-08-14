@@ -188,6 +188,19 @@ class QuestionCandidateTracker:
         self.state = CandidateState.FINALIZED
         return decision
 
+    def note_draft_deferred(self) -> None:
+        """Called by the orchestrator when it decided *not* to act on a
+        `start_or_replace_draft` decision (a different turn's answer was
+        already generating/queued) — reverts the `DRAFTING` transition
+        this class itself just made back to `CANDIDATE`, and clears
+        `_drafted_text`, so a later `on_finalize` for this turn correctly
+        concludes no draft actually exists yet and always regenerates,
+        instead of wrongly matching against text that was never actually
+        sent to the model."""
+        if self.state == CandidateState.DRAFTING:
+            self.state = CandidateState.CANDIDATE
+        self._drafted_text = None
+
     def on_reject(self) -> None:
         self.state = CandidateState.REJECTED
         self._drafted_text = None

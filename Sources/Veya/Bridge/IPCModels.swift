@@ -198,6 +198,14 @@ struct SetUserSpeakingParams: Encodable, Sendable {
     let active: Bool
 }
 
+/// `answer.retry`'s params (Section 17) — identifies the exact failed
+/// question to regenerate an answer for.
+struct AnswerRetryParams: Encodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let questionText: String
+}
+
 /// `knowledge.ingest`'s params. `filePath` must already be the
 /// app-managed copied-document path (`SessionDocument.storedPath`) —
 /// Python validates it resolves beneath `VEYA_DOCUMENTS_DIRECTORY` before
@@ -542,6 +550,48 @@ struct AnswerCompletedEventData: Decodable, Sendable {
     /// `CopilotAnswer.talkingPoints` as a final entry by `IPCEventRouter`
     /// rather than requiring a further `CopilotAnswer` schema change.
     let caveat: String
+    /// Section 17: `true` when generation failed/timed out — `answerText`
+    /// is then a status message, not a real answer. `IPCEventRouter` must
+    /// never let this overwrite `ConversationState.currentAnswer`; it
+    /// surfaces as a separate, dismissable, retryable error instead.
+    /// Defaults to `false` only for decode resilience against an older
+    /// worker version.
+    let isFailed: Bool?
+}
+
+// MARK: - Interviewer-turn scheduling (Section 17)
+
+struct AnswerQueuedEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let text: String
+    let queuePosition: Int
+    let queueDepth: Int
+}
+
+struct AnswerQueueOverflowEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let text: String
+}
+
+struct AnswerDequeuedEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let queueDepth: Int
+}
+
+/// Section 17: raw epoch-second latency timestamps for one answer round
+/// — only emitted when the worker was launched with
+/// `VEYA_ANSWER_TIMING_DIAGNOSTICS=1`. Diagnostics-only; never shown in
+/// the normal interview UI.
+struct AnswerTimingEventData: Decodable, Sendable {
+    let sessionId: String
+    let questionId: String
+    let stabilizedAt: Double
+    let generationRequestStart: Double
+    let firstTokenAt: Double?
+    let completedAt: Double?
 }
 
 // MARK: - Knowledge ingestion events (Section 9)

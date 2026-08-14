@@ -183,77 +183,35 @@ struct LiveSessionView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("ANSWER").font(.caption.bold()).foregroundStyle(.secondary)
 
-            // A completed answer is always shown once one exists, even if
-            // the pipeline has since moved on to listening for the next
-            // turn — it's only replaced once a *newer* answer completes,
-            // and never shown at all while a newer round (candidate,
-            // draft, refinement, or classic generation) is in flight.
-            if let answer = conversationState.currentAnswer, !isAnswerRoundInFlight {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(answer.question).font(.headline)
-                    // The natural, speakable answer leads — talking points
-                    // are optional supporting detail, shown expanded here
-                    // (Live Session has room, unlike the compact overlay)
-                    // but never presented as the primary content on their
-                    // own (Section 16).
-                    if !answer.answerText.isEmpty {
-                        Text(answer.answerText).font(.body)
-                    }
-                    if !answer.talkingPoints.isEmpty {
-                        DisclosureGroup("Details") {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(answer.talkingPoints, id: \.self) { point in
-                                    Text("• \(point)").font(.callout).foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .font(.caption.bold())
-                    }
-                    if !answer.sources.isEmpty {
-                        Text("Sources").font(.caption.bold()).foregroundStyle(.secondary)
-                        ForEach(answer.sources, id: \.self) { Text("• \($0)").font(.caption) }
-                    }
+            if let failureMessage = conversationState.lastAnswerFailureMessage {
+                answerFailureBanner(failureMessage)
+            }
+
+            // A completed answer is always shown once one exists — it is
+            // never hidden just because a newer round (candidate, draft,
+            // refinement, or generation) is in flight; the in-flight
+            // content is shown *above* it instead, and this is only
+            // actually replaced once a newer answer completes.
+            if isAnswerRoundInFlight {
+                inFlightContent
+                if let answer = conversationState.currentAnswer {
+                    previousAnswerView(answer)
                 }
+            } else if let answer = conversationState.currentAnswer {
+                answerContent(answer)
             } else {
-                switch activeStep {
-                case .refining, .drafting:
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let questionText = conversationState.finalizedQuestionText ?? conversationState.candidateQuestionText {
-                            Text(questionText).font(.headline)
-                        }
-                        HStack { ProgressView().controlSize(.small); Text(activeStep.label).font(.callout) }
-                        // The draft's own streamed text is the prominent
-                        // content here — it's real generated content, not
-                        // a placeholder, even before the turn finalizes.
-                        if !conversationState.draftAnswerText.isEmpty {
-                            Text(conversationState.draftAnswerText).font(.body)
-                        }
-                    }
-                case .generating:
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack { ProgressView().controlSize(.small); Text("Generating answer…").font(.callout) }
-                        if let partial = conversationState.partialAnswerText, !partial.isEmpty {
-                            Text(partial).font(.callout).foregroundStyle(.secondary)
-                        }
-                    }
-                case .understanding:
-                    HStack { ProgressView().controlSize(.small); Text("Understanding question…").font(.callout) }
-                case .hearingQuestion:
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Hearing a question…").font(.callout).foregroundStyle(.secondary)
-                        if let candidateText = conversationState.candidateQuestionText, !candidateText.isEmpty {
-                            Text(candidateText).font(.callout.italic())
-                        }
-                    }
-                case .waitingForSilence:
-                    Text("Waiting for the speaker to finish…").font(.callout).foregroundStyle(.secondary)
-                case .unavailable:
-                    Text("Local AI isn't configured — questions will be detected in the transcript, but no answer will be generated.")
-                        .font(.callout).foregroundStyle(.secondary)
-                case .transcribing:
-                    Text("Listening for a question…").font(.callout).foregroundStyle(.secondary)
-                case .listening:
-                    Text("No question detected yet.").font(.callout).foregroundStyle(.secondary)
+                idleContent
+            }
+
+            if conversationState.queuedQuestionsCount > 0 {
+                Text("\(conversationState.queuedQuestionsCount) question\(conversationState.queuedQuestionsCount == 1 ? "" : "s") pending")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let overflowMessage = conversationState.queueOverflowMessage {
+                HStack(alignment: .top) {
+                    Text(overflowMessage).font(.caption2).foregroundStyle(.orange)
+                    Spacer()
+                    Button("Dismiss") { conversationState.dismissQueueOverflow() }.font(.caption2)
                 }
             }
         }
@@ -261,6 +219,132 @@ struct LiveSessionView: View {
         .padding(16)
         .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor.opacity(0.25), lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func answerFailureBanner(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+            HStack {
+                if let questionID = conversationState.lastFailedQuestionID,
+                   let questionText = conversationState.lastFailedQuestionText {
+                    Button("Retry") {
+                        Task { await pythonIntelligenceCoordinator.retryFailedAnswer(questionID: questionID, questionText: questionText) }
+                    }
+                    .font(.caption)
+                }
+                Button("Dismiss") { conversationState.dismissAnswerFailure() }
+                    .font(.caption)
+            }
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func answerContent(_ answer: CopilotAnswer) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(answer.question).font(.headline)
+            // The natural, speakable answer leads — talking points are
+            // optional supporting detail, shown expanded here (Live
+            // Session has room, unlike the compact overlay) but never
+            // presented as the primary content on their own (Section 16).
+            if !answer.answerText.isEmpty {
+                Text(answer.answerText).font(.body)
+            }
+            if !answer.talkingPoints.isEmpty {
+                DisclosureGroup("Details") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(answer.talkingPoints, id: \.self) { point in
+                            Text("• \(point)").font(.callout).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .font(.caption.bold())
+            }
+            if !answer.sources.isEmpty {
+                Text("Sources").font(.caption.bold()).foregroundStyle(.secondary)
+                ForEach(answer.sources, id: \.self) { Text("• \($0)").font(.caption) }
+            }
+        }
+    }
+
+    /// A compact, visually de-emphasized rendering of the last completed
+    /// answer, shown below in-flight content while a newer answer is
+    /// being drafted/generated — never removed until the newer one
+    /// actually completes.
+    @ViewBuilder
+    private func previousAnswerView(_ answer: CopilotAnswer) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("PREVIOUS ANSWER").font(.caption2.bold()).foregroundStyle(.secondary)
+            Text(answer.question).font(.subheadline).foregroundStyle(.secondary)
+            if !answer.answerText.isEmpty {
+                Text(answer.answerText).font(.callout).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 8)
+        .opacity(0.7)
+    }
+
+    @ViewBuilder
+    private var inFlightContent: some View {
+        switch activeStep {
+        case .refining, .drafting:
+            VStack(alignment: .leading, spacing: 6) {
+                if let questionText = conversationState.finalizedQuestionText ?? conversationState.candidateQuestionText {
+                    Text(questionText).font(.headline)
+                }
+                HStack { ProgressView().controlSize(.small); Text(activeStep.label).font(.callout) }
+                // The draft's own streamed text is the prominent content
+                // here — it's real generated content, not a placeholder,
+                // even before the turn finalizes.
+                if !conversationState.draftAnswerText.isEmpty {
+                    Text(conversationState.draftAnswerText).font(.body)
+                }
+            }
+        case .generating:
+            VStack(alignment: .leading, spacing: 6) {
+                HStack { ProgressView().controlSize(.small); Text("Generating answer…").font(.callout) }
+                if let partial = conversationState.partialAnswerText, !partial.isEmpty {
+                    Text(partial).font(.callout)
+                }
+            }
+        case .understanding:
+            HStack { ProgressView().controlSize(.small); Text("Understanding question…").font(.callout) }
+        case .hearingQuestion:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Hearing a question…").font(.callout).foregroundStyle(.secondary)
+                if let candidateText = conversationState.candidateQuestionText, !candidateText.isEmpty {
+                    Text(candidateText).font(.callout.italic())
+                }
+            }
+        case .waitingForSilence, .unavailable, .transcribing, .listening:
+            // These states never set `isAnswerRoundInFlight`, so
+            // `inFlightContent` is never reached for them — see
+            // `activeStep`/`isAnswerRoundInFlight`.
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var idleContent: some View {
+        switch activeStep {
+        case .waitingForSilence:
+            Text("Waiting for the speaker to finish…").font(.callout).foregroundStyle(.secondary)
+        case .unavailable:
+            Text("Local AI isn't configured — questions will be detected in the transcript, but no answer will be generated.")
+                .font(.callout).foregroundStyle(.secondary)
+        case .transcribing:
+            Text("Listening for a question…").font(.callout).foregroundStyle(.secondary)
+        case .listening:
+            Text("No question detected yet.").font(.callout).foregroundStyle(.secondary)
+        case .refining, .drafting, .generating, .understanding, .hearingQuestion:
+            // Unreachable: any of these implies `isAnswerRoundInFlight`,
+            // which routes to `inFlightContent` instead.
+            EmptyView()
+        }
     }
 
     private var transcriptPanel: some View {

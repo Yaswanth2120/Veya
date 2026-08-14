@@ -487,6 +487,7 @@ async def _handle_transcription_start(params: dict, context: WorkerContext) -> d
         llm_provider=llm_provider,
         retriever=_get_or_create_retriever(context),
         memory_texts=_get_or_create_memory_store(context).approved_texts(),
+        emit_timing_diagnostics=os.environ.get("VEYA_ANSWER_TIMING_DIAGNOSTICS") == "1",
     )
     context.conversation_orchestrator = orchestrator
 
@@ -681,6 +682,44 @@ async def _handle_answer_cancel(params: dict, context: WorkerContext) -> dict:
 
     await context.conversation_orchestrator.cancel_active_answer()
     logger.info("answer.cancel session_id=%s", session_id)
+    return {"ok": True}
+
+
+async def _handle_answer_skip(params: dict, context: WorkerContext) -> dict:
+    """Section 17: the explicit, user-initiated "Skip current answer"
+    control — distinct from `answer.cancel` (session-teardown cleanup,
+    which must never advance the queue). Cancels the active generation
+    and immediately starts the next queued turn, if any."""
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
+    if context.conversation_orchestrator is None or context.conversation_orchestrator.session_id != session_id:
+        raise ProtocolError(ErrorCode.NOT_RUNNING, "No active conversation orchestrator for this session id.")
+
+    await context.conversation_orchestrator.skip_active_answer()
+    logger.info("answer.skip session_id=%s", session_id)
+    return {"ok": True}
+
+
+async def _handle_answer_retry(params: dict, context: WorkerContext) -> dict:
+    """Section 17: explicit user-initiated retry after a failed/timed-out
+    answer — re-runs generation for the exact question that just failed,
+    identified by the caller (Swift only ever has this after receiving
+    that question's own `answer.completed` with `is_failed: true`)."""
+    session_id = params.get("session_id")
+    question_id = params.get("question_id")
+    question_text = params.get("question_text")
+    if not isinstance(session_id, str) or not session_id:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
+    if not isinstance(question_id, str) or not question_id:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'question_id' is required and must be a string.")
+    if not isinstance(question_text, str) or not question_text:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "'question_text' is required and must be a string.")
+    if context.conversation_orchestrator is None or context.conversation_orchestrator.session_id != session_id:
+        raise ProtocolError(ErrorCode.NOT_RUNNING, "No active conversation orchestrator for this session id.")
+
+    await context.conversation_orchestrator.retry_failed_answer(question_id=question_id, question_text=question_text)
+    logger.info("answer.retry session_id=%s question_id=%s", session_id, question_id)
     return {"ok": True}
 
 
@@ -1048,6 +1087,8 @@ _HANDLERS: dict[str, Handler] = {
     "transcription.stop_meeting_audio": _handle_transcription_stop_meeting_audio,
     "conversation.set_user_speaking": _handle_conversation_set_user_speaking,
     "answer.cancel": _handle_answer_cancel,
+    "answer.skip": _handle_answer_skip,
+    "answer.retry": _handle_answer_retry,
     "knowledge.ingest": _handle_knowledge_ingest,
     "knowledge.remove": _handle_knowledge_remove,
     "knowledge.status": _handle_knowledge_status,

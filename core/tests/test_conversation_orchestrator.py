@@ -289,9 +289,13 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await orchestrator.close()
         await emitter.wait_for_event("question.detected")
 
-    async def test_a_new_question_cancels_a_still_running_previous_answer(self):
+    async def test_a_new_question_is_queued_not_cancelled_while_the_previous_answer_is_still_generating(self):
+        """Section 17: replaces the old behavior (a newer question
+        cancelled whatever was still generating) — the reported failure
+        mode. The first answer must reach `answer.completed`, and the
+        second must only start generating after it does."""
         emitter = RecordingEmitter()
-        provider = SlowFakeProvider(["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"], delay=0.05)
+        provider = SlowFakeProvider(["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"], delay=0.03)
         orchestrator = ConversationOrchestrator(
             session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
         )
@@ -300,17 +304,127 @@ class ConversationOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         await emitter.wait_for_event("answer.started")  # sequence 1 actually started generating
 
         await finalize_turn(orchestrator, "How did the second thing happen?", 4.0, 8.0)
-        await emitter.wait_for_nth_event("answer.started", 2)
+        queued = await emitter.wait_for_event("answer.queued")
+        self.assertEqual(queued["queue_position"], 1)
+        self.assertEqual(queued["text"], "How did the second thing happen?")
 
-        # The first answer never reaches answer.completed — it was
-        # superseded, not left to finish in the background.
-        first_question_events = [d for n, d in emitter.events if n == "answer.started"]
-        self.assertEqual(len(first_question_events), 2)
-        self.assertEqual(first_question_events[0]["sequence"], 1)
-        self.assertEqual(first_question_events[1]["sequence"], 2)
+        # The second question must NOT start generating while the first
+        # is still in flight.
+        self.assertNotIn("answer.dequeued", emitter.names())
+        first_started = [d for n, d in emitter.events if n == "answer.started"]
+        self.assertEqual(len(first_started), 1)
 
+        first_completed = await emitter.wait_for_event("answer.completed")
+        self.assertEqual(first_completed["sequence"], 1)
+        self.assertFalse(first_completed["is_failed"])
+
+        await emitter.wait_for_event("answer.dequeued")
+        second_started = await emitter.wait_for_nth_event("answer.started", 2)
+        self.assertEqual(second_started["sequence"], 2)
+
+        second_completed = await emitter.wait_for_nth_event("answer.completed", 2)
+        self.assertEqual(second_completed["sequence"], 2)
+
+        await orchestrator.close()
+
+    async def test_a_third_and_fourth_question_preserve_queue_order_and_bounded_capacity(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["a", "b"], delay=0.03)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "Question one?", 0.0, 1.0)
+        await emitter.wait_for_event("answer.started")
+        await finalize_turn(orchestrator, "Question two?", 1.0, 2.0)
+        await finalize_turn(orchestrator, "Question three?", 2.0, 3.0)
+        await finalize_turn(orchestrator, "Question four?", 3.0, 4.0)
+
+        queued_events = [d for n, d in emitter.events if n == "answer.queued"]
+        self.assertEqual([e["text"] for e in queued_events], ["Question two?", "Question three?", "Question four?"])
+        self.assertEqual([e["queue_position"] for e in queued_events], [1, 2, 3])
+
+        # A fifth, over-capacity question is never silently dropped —
+        # it's explicitly reported as not queued.
+        await finalize_turn(orchestrator, "Question five?", 4.0, 5.0)
+        overflow = await emitter.wait_for_event("answer.queue_overflow")
+        self.assertEqual(overflow["text"], "Question five?")
+        self.assertNotIn("Question five?", [e["text"] for e in queued_events])
+
+        await orchestrator.close()
+
+    async def test_skip_active_answer_is_never_automatic_but_advances_the_queue_when_called(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["a", "b", "c", "d", "e"], delay=0.05)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "Question one?", 0.0, 1.0)
+        await emitter.wait_for_event("answer.started")
+        await finalize_turn(orchestrator, "Question two?", 1.0, 2.0)
+        await emitter.wait_for_event("answer.queued")
+
+        await orchestrator.skip_active_answer()
+
+        # The skipped answer never completes normally...
         completed_sequences = [d["sequence"] for n, d in emitter.events if n == "answer.completed"]
         self.assertNotIn(1, completed_sequences)
+        # ...and the queued question starts right away instead of waiting
+        # for the (now-abandoned) first answer.
+        await emitter.wait_for_event("answer.dequeued")
+        second_started = await emitter.wait_for_nth_event("answer.started", 2)
+        self.assertEqual(second_started["sequence"], 2)
+
+        await orchestrator.close()
+
+    async def test_duplicate_finalization_of_the_same_turn_does_not_produce_a_duplicate_answer(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ok"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        text = "Why did the first thing happen?"
+        await orchestrator.handle_final_transcript(text, 0.0, 4.0)
+        await orchestrator.handle_turn_boundary(4.0)
+        # A second, redundant finalize signal for the exact same turn
+        # (e.g. a race between a VAD boundary and the speculative-finalize
+        # debounce) must be a no-op, not a second answer.
+        await orchestrator.handle_turn_boundary(4.0)
+
+        await emitter.wait_for_event("answer.completed")
+        await asyncio.sleep(0.05)
+
+        finalized_events = [d for n, d in emitter.events if n == "question.finalized"]
+        self.assertEqual(len(finalized_events), 1)
+        started_events = [d for n, d in emitter.events if n == "answer.started"]
+        self.assertEqual(len(started_events), 1)
+
+        await orchestrator.close()
+
+    async def test_a_material_extension_of_the_open_turn_replaces_only_that_turns_draft(self):
+        """A materially different partial for the SAME still-open turn
+        replaces its own speculative draft (unchanged, pre-existing
+        behavior) — must not be confused with the new queueing behavior
+        for genuinely different, already-finalized questions."""
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["a", "b", "c", "d"], delay=0.03)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await orchestrator.handle_partial_transcript("What was the bottleneck in the pipeline", 1.0)
+        draft_started = await emitter.wait_for_event("answer.draft_started")
+        first_question_id = draft_started["question_id"]
+
+        await orchestrator.handle_partial_transcript("Tell me about a time you led a project", 2.0)
+        draft_replaced = await emitter.wait_for_event("answer.draft_replaced")
+        self.assertEqual(draft_replaced["question_id"], first_question_id)
+
+        # Still exactly one question_id in play — never queued behind
+        # itself.
+        self.assertNotIn("answer.queued", emitter.names())
 
         await orchestrator.close()
 
@@ -909,5 +1023,125 @@ class GroundedAnswerTests(unittest.IsolatedAsyncioTestCase):
         await finalize_turn(orchestrator, "Why did the migration take six weeks?", 0.0, 4.0)
         completed = await emitter.wait_for_event("answer.completed")
         self.assertEqual(completed["sources"], [])
+
+        await orchestrator.close()
+
+
+class _HangingRetriever:
+    """Never resolves within the orchestrator's retrieval timeout —
+    lets `test_a_slow_retriever_never_blocks_answer_generation` prove
+    generation still starts and completes on a bounded schedule."""
+
+    async def retrieve(self, session_id, query_text):
+        await asyncio.sleep(30.0)
+        return []
+
+    def build_context_block(self, retrieved):
+        return ""
+
+
+class TurnSchedulingRobustnessTests(unittest.IsolatedAsyncioTestCase):
+    """Section 17: latency and failure-handling guarantees around one
+    answer generation round, independent of the multi-turn queueing
+    behavior covered above."""
+
+    async def test_first_delta_is_emitted_before_answer_completed(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ", "The pipeline was", " optimized by batching."], delay=0.02)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "Tell me about yourself.", 0.0, 2.0)
+        await emitter.wait_for_event("answer.delta")
+        await emitter.wait_for_event("answer.completed")
+        # The delta must have arrived strictly before completion, not
+        # merely both eventually present in the event log.
+        names = emitter.names()
+        self.assertLess(names.index("answer.delta"), names.index("answer.completed"))
+
+        await orchestrator.close()
+
+    async def test_a_slow_retriever_never_blocks_answer_generation(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ok"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider,
+            retriever=_HangingRetriever(),
+        )
+
+        await finalize_turn(orchestrator, "Tell me about yourself.", 0.0, 2.0)
+        # Bounded well under the retriever's 30s hang — proves the
+        # orchestrator's own retrieval timeout, not the test's patience,
+        # is what unblocked this.
+        completed = await emitter.wait_for_event("answer.completed", timeout=5.0)
+        self.assertEqual(completed["sources"], [])
+        self.assertFalse(completed["is_failed"])
+
+        await orchestrator.close()
+
+    async def test_timing_diagnostics_are_off_by_default(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ok"], delay=0.01)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "Tell me about yourself.", 0.0, 2.0)
+        await emitter.wait_for_event("answer.completed")
+        await asyncio.sleep(0.02)
+
+        self.assertNotIn("answer.timing", emitter.names())
+        await orchestrator.close()
+
+    async def test_timing_diagnostics_report_real_ordered_timestamps_when_enabled(self):
+        emitter = RecordingEmitter()
+        provider = SlowFakeProvider(["ANSWER: ", "ok"], delay=0.02)
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider,
+            emit_timing_diagnostics=True,
+        )
+
+        await finalize_turn(orchestrator, "Tell me about yourself.", 0.0, 2.0)
+        timing = await emitter.wait_for_event("answer.timing")
+
+        self.assertLessEqual(timing["stabilized_at"], timing["generation_request_start"])
+        self.assertLessEqual(timing["generation_request_start"], timing["first_token_at"])
+        self.assertLessEqual(timing["first_token_at"], timing["completed_at"])
+
+        await orchestrator.close()
+
+    async def test_generation_failure_emits_a_typed_terminal_state_without_destroying_prior_context(self):
+        from veya.llm.errors import LLMProviderError
+
+        class _FailsOnSecondCall:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate_stream(self, prompt, *, timeout):
+                self.calls += 1
+                if self.calls == 1:
+                    yield "ANSWER: The first answer, spoken naturally."
+                    return
+                yield "partial before it breaks"
+                raise LLMProviderError("provider broke mid-stream")
+
+        emitter = RecordingEmitter()
+        provider = _FailsOnSecondCall()
+        orchestrator = ConversationOrchestrator(
+            session_id="s1", session_context=SessionContext(), emit_event=emitter, llm_provider=provider
+        )
+
+        await finalize_turn(orchestrator, "Tell me about yourself.", 0.0, 2.0)
+        first_completed = await emitter.wait_for_event("answer.completed")
+        self.assertFalse(first_completed["is_failed"])
+
+        await finalize_turn(orchestrator, "What did you mean by that?", 2.0, 4.0)
+        second_completed = await emitter.wait_for_nth_event("answer.completed", 2)
+        self.assertTrue(second_completed["is_failed"])
+        # The prior turn's real answer is still in the event log,
+        # untouched by the later failure — Swift's job is to keep
+        # rendering it rather than overwrite it with the failure text.
+        self.assertIn("The first answer, spoken naturally.", first_completed["answer_text"])
 
         await orchestrator.close()

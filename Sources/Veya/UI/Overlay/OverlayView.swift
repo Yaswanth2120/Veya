@@ -20,14 +20,38 @@ struct OverlayView: View {
 
     @State private var style: OverlayAnswerStyle = .short
 
+    /// Mirrors `LiveSessionView.isAnswerRoundInFlight` exactly — the
+    /// overlay must show the same primary current/draft answer state as
+    /// the main app, never a different one (Section 17).
+    private var isAnswerRoundInFlight: Bool {
+        conversationState.isGeneratingAnswer
+            || conversationState.isDraftingAnswer
+            || conversationState.isClassifyingQuestion
+            || conversationState.isAnalyzingQuestion
+            || conversationState.candidateState == .candidate
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
 
-            if let answer = conversationState.currentAnswer, !conversationState.isDraftingAnswer {
-                answerContent(for: answer)
-            } else if conversationState.isDraftingAnswer {
+            if let failureMessage = conversationState.lastAnswerFailureMessage {
+                Label(failureMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // A completed answer is never hidden just because a newer
+            // round is in flight — the in-flight content is shown above
+            // it instead, same as the main app's Answer panel.
+            if isAnswerRoundInFlight {
                 draftContent
+                if let answer = conversationState.currentAnswer {
+                    previousAnswerContent(for: answer)
+                }
+            } else if let answer = conversationState.currentAnswer {
+                answerContent(for: answer)
             } else {
                 emptyState
             }
@@ -117,7 +141,7 @@ struct OverlayView: View {
         }
     }
 
-    /// A compact draft-in-progress view — the same speculative content
+    /// A compact in-flight view — the same speculative/generating content
     /// `LiveSessionView`'s answer panel shows, kept short since the
     /// overlay must stay small and non-obstructive.
     @ViewBuilder
@@ -129,15 +153,49 @@ struct OverlayView: View {
         }
         HStack(spacing: 6) {
             ProgressView().controlSize(.small)
-            Text(conversationState.isRefiningAnswer ? "Refining…" : "Drafting…")
+            Text(inFlightStatusLabel)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        if !conversationState.draftAnswerText.isEmpty {
+        // The draft's own streamed text is real generated content, shown
+        // as soon as the first delta arrives — never a placeholder.
+        if conversationState.isDraftingAnswer, !conversationState.draftAnswerText.isEmpty {
             Text(conversationState.draftAnswerText)
                 .font(.callout)
                 .lineLimit(4)
+        } else if let partial = conversationState.partialAnswerText, !partial.isEmpty {
+            Text(partial)
+                .font(.callout)
+                .lineLimit(4)
         }
+    }
+
+    private var inFlightStatusLabel: String {
+        if conversationState.isRefiningAnswer { return "Refining…" }
+        if conversationState.isDraftingAnswer { return "Drafting…" }
+        if conversationState.isGeneratingAnswer { return "Generating…" }
+        if conversationState.isClassifyingQuestion || conversationState.isAnalyzingQuestion { return "Understanding…" }
+        return "Hearing a question…"
+    }
+
+    /// A compact, de-emphasized rendering of the last completed answer,
+    /// shown below in-flight content — never removed until a newer
+    /// answer actually completes.
+    @ViewBuilder
+    private func previousAnswerContent(for answer: CopilotAnswer) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("PREVIOUS ANSWER")
+                .font(.caption2.bold())
+                .foregroundStyle(.secondary)
+            if !answer.answerText.isEmpty {
+                Text(answer.answerText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+        }
+        .padding(.top, 4)
+        .opacity(0.7)
     }
 
     private var emptyState: some View {

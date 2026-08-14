@@ -682,6 +682,28 @@ final class PythonIntelligenceCoordinator: ObservableObject {
         await setUserSpeaking(!isUserSpeaking)
     }
 
+    /// Section 17: the explicit, user-initiated "Skip current answer"
+    /// control — never triggered automatically. Cancels whatever is
+    /// actively generating and advances the interviewer-turn queue.
+    func skipActiveAnswer() async {
+        guard let sessionID = activeSessionID, drivingSource == .realTranscription else { return }
+        let _: OkResult? = try? await workerManager.call(
+            method: "answer.skip",
+            params: SessionIdentifierParams(sessionId: sessionID.uuidString)
+        )
+    }
+
+    /// Section 17: retries the exact question a failed/timed-out
+    /// generation was for, identified from that failure's own
+    /// `answer.completed` event (see `ConversationState.lastFailedQuestionID`).
+    func retryFailedAnswer(questionID: String, questionText: String) async {
+        guard let sessionID = activeSessionID, drivingSource == .realTranscription else { return }
+        let _: OkResult? = try? await workerManager.call(
+            method: "answer.retry",
+            params: AnswerRetryParams(sessionId: sessionID.uuidString, questionId: questionID, questionText: questionText)
+        )
+    }
+
     /// The single, non-technical string `LiveSessionView` shows — the only
     /// place that maps internal state to user-facing copy, per the build
     /// prompt's exact wording.

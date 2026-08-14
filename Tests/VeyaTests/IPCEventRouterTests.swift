@@ -197,6 +197,49 @@ struct IPCEventRouterTests {
         #expect(state.partialAnswerText == nil)
     }
 
+    @Test("answer.completed with is_failed true never overwrites currentAnswer, and surfaces a dismissable error")
+    func answerCompletedFailurePreservesPriorAnswer() async throws {
+        let sessionID = UUID()
+        let (state, _) = await makeState(sessionID: sessionID)
+        let router = IPCEventRouter()
+        router.attach(state: state, sessionID: sessionID)
+
+        await router.route(
+            try makeEvent("answer.started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q1","sequence":1}"#)
+        )
+        let firstQuestionID = UUID()
+        await router.route(
+            try makeEvent(
+                "answer.completed",
+                #"""
+                {"session_id":"\#(sessionID.uuidString)","question_id":"\#(firstQuestionID.uuidString)","question":"Tell me about yourself.","answer_text":"I'm a backend engineer...","talking_points":[],"sources":[],"sequence":1,"caveat":"","is_failed":false}
+                """#
+            )
+        )
+        #expect(state.currentAnswer?.answerText == "I'm a backend engineer...")
+
+        await router.route(
+            try makeEvent("answer.started", #"{"session_id":"\#(sessionID.uuidString)","question_id":"q2","sequence":2}"#)
+        )
+        let secondQuestionID = UUID()
+        await router.route(
+            try makeEvent(
+                "answer.completed",
+                #"""
+                {"session_id":"\#(sessionID.uuidString)","question_id":"\#(secondQuestionID.uuidString)","question":"What did you mean by that?","answer_text":"Answer generation failed — the local LLM provider became unavailable mid-response.","talking_points":[],"sources":[],"sequence":2,"caveat":"","is_failed":true}
+                """#
+            )
+        )
+
+        // The real prior answer must still be the durable current answer
+        // — the exact bug being fixed here: a failure silently
+        // overwriting it with the failure status text.
+        #expect(state.currentAnswer?.answerText == "I'm a backend engineer...")
+        #expect(state.lastAnswerFailureMessage?.contains("became unavailable") == true)
+        #expect(state.lastFailedQuestionID == secondQuestionID.uuidString)
+        #expect(state.isGeneratingAnswer == false)
+    }
+
     @Test("answer.completed folds a non-empty caveat into the talking points")
     func answerCompletedFoldsCaveat() async throws {
         let sessionID = UUID()

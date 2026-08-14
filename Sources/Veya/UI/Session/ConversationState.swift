@@ -75,6 +75,38 @@ final class ConversationState: ObservableObject {
     @Published private(set) var vadDiagnostics: [VADDiagnosticSample] = []
     private static let maxRetainedVADDiagnostics = 200
 
+    /// Section 17: one real latency record per answer round — only ever
+    /// populated when the worker was launched with
+    /// `VEYA_ANSWER_TIMING_DIAGNOSTICS=1`. Diagnostics-only, never shown
+    /// in the normal interview UI.
+    struct AnswerTimingSample: Identifiable, Sendable {
+        let id = UUID()
+        let stabilizedAt: Date
+        let generationRequestStart: Date
+        let firstTokenAt: Date?
+        let completedAt: Date?
+        /// Seconds from the question stabilizing to the first visible
+        /// token — the "first useful text" latency the build prompt asks
+        /// to track.
+        var firstTokenLatencySeconds: Double? {
+            guard let firstTokenAt else { return nil }
+            return firstTokenAt.timeIntervalSince(stabilizedAt)
+        }
+        var totalLatencySeconds: Double? {
+            guard let completedAt else { return nil }
+            return completedAt.timeIntervalSince(stabilizedAt)
+        }
+    }
+    @Published private(set) var answerTimingSamples: [AnswerTimingSample] = []
+    private static let maxRetainedAnswerTimingSamples = 50
+
+    func recordAnswerTiming(_ sample: AnswerTimingSample) {
+        answerTimingSamples.append(sample)
+        if answerTimingSamples.count > Self.maxRetainedAnswerTimingSamples {
+            answerTimingSamples.removeFirst(answerTimingSamples.count - Self.maxRetainedAnswerTimingSamples)
+        }
+    }
+
     /// Section 15: the evolving "is this an answer request, and how sure
     /// are we" state, mirroring Python's `QuestionCandidateTracker`
     /// exactly — inferred here from which candidate/draft events have
@@ -105,6 +137,28 @@ final class ConversationState: ObservableObject {
     /// never mutate visible state (a superseded draft's late events
     /// arriving after a replacement, for instance).
     @Published private(set) var draftSequence: Int?
+
+    // MARK: - Section 17: answer failure / interviewer-turn queue
+
+    /// Set when `answer.completed` arrives with `is_failed: true` —
+    /// `currentAnswer` (the last real completed answer) is deliberately
+    /// left untouched so it stays visible; the UI shows this as a
+    /// separate, dismissable, retryable error instead of losing the
+    /// prior answer. Cleared automatically once a new answer round
+    /// actually starts or completes.
+    @Published private(set) var lastAnswerFailureMessage: String?
+    /// The question a failed generation was for — kept only so "Retry"
+    /// can resend the exact same, already-classified question rather
+    /// than requiring the interviewer to ask it again.
+    @Published private(set) var lastFailedQuestionID: String?
+    @Published private(set) var lastFailedQuestionText: String?
+    /// How many finalized interviewer turns are currently waiting behind
+    /// the one actively generating — 0 means nothing is queued.
+    @Published private(set) var queuedQuestionsCount = 0
+    /// Set when the bounded queue was already full and a newly finalized
+    /// question could not be queued — an honest "this won't be answered"
+    /// notice rather than a silent drop.
+    @Published private(set) var queueOverflowMessage: String?
 
     // MARK: - Developer diagnostics (safe metadata only — see
     // `VADDiagnosticsView`; never transcript/prompt/answer text)
@@ -262,6 +316,7 @@ final class ConversationState: ObservableObject {
         if generating {
             isAnalyzingQuestion = false
             partialAnswerText = nil
+            lastAnswerFailureMessage = nil
         }
     }
 
@@ -275,6 +330,7 @@ final class ConversationState: ObservableObject {
         isGeneratingAnswer = false
         isClassifyingQuestion = false
         partialAnswerText = nil
+        queuedQuestionsCount = 0
         resetCandidateTracking()
     }
 
@@ -286,8 +342,42 @@ final class ConversationState: ObservableObject {
         currentAnswer = answer
         isGeneratingAnswer = false
         partialAnswerText = nil
+        lastAnswerFailureMessage = nil
+        lastFailedQuestionID = nil
+        lastFailedQuestionText = nil
         resetCandidateTracking()
         try? await repository.save(answer)
+    }
+
+    /// A generation round ended in failure/timeout (Section 17) —
+    /// deliberately does **not** touch `currentAnswer`: the last real
+    /// completed answer must stay visible, with this surfaced as a
+    /// separate, retryable notice rather than overwriting it.
+    func ingestAnswerFailure(_ message: String, questionID: String, questionText: String) {
+        isGeneratingAnswer = false
+        partialAnswerText = nil
+        lastAnswerFailureMessage = message
+        lastFailedQuestionID = questionID
+        lastFailedQuestionText = questionText
+        resetCandidateTracking()
+    }
+
+    func dismissAnswerFailure() {
+        lastAnswerFailureMessage = nil
+        lastFailedQuestionID = nil
+        lastFailedQuestionText = nil
+    }
+
+    func setQueuedQuestionsCount(_ count: Int) {
+        queuedQuestionsCount = count
+    }
+
+    func noteQueueOverflow(_ questionText: String) {
+        queueOverflowMessage = "Too many questions came in at once — \"\(questionText)\" was not queued and will not be answered."
+    }
+
+    func dismissQueueOverflow() {
+        queueOverflowMessage = nil
     }
 
     // MARK: - Question candidate / draft answer lifecycle (Section 15)

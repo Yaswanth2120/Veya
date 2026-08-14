@@ -90,6 +90,7 @@ def answer_completed(
     sequence: int = 1,
     caveat: str = "",
     answer_text: str = "",
+    is_failed: bool = False,
 ) -> dict:
     """`sources` (Section 9): a list of structured references —
     `{"document_id", "file_name", "chunk_id", "excerpt"}` each — never
@@ -99,7 +100,13 @@ def answer_completed(
 
     `answer_text` (Section 16): the natural, speakable answer — the
     primary content Swift renders; `talking_points` is optional
-    supporting detail, never the sole answer."""
+    supporting detail, never the sole answer.
+
+    `is_failed` (Section 17): `True` when generation failed/timed out —
+    `answer_text` is then a status message, not a real answer, and Swift
+    must never promote it to the primary/durable answer slot (it should
+    preserve whatever completed answer was already showing and surface
+    this as a dismissable, retryable error instead)."""
     return {
         "session_id": session_id,
         "question_id": question_id,
@@ -109,6 +116,71 @@ def answer_completed(
         "sources": sources,
         "sequence": sequence,
         "caveat": caveat,
+        "is_failed": is_failed,
+    }
+
+
+# MARK: - Interviewer-turn scheduling (Section 17)
+#
+# A finalized interviewer question that arrives while a different
+# question's answer is already generating is queued, never used to
+# cancel the active answer — see `ConversationOrchestrator._enqueue_turn`.
+
+
+def answer_queued(session_id: str, question_id: str, text: str, queue_position: int, queue_depth: int) -> dict:
+    """`queue_position` is 1-based (this turn's place in line);
+    `queue_depth` is the total number of turns currently waiting,
+    including this one — lets Swift show an honest "N questions
+    pending" status rather than nothing happening."""
+    return {
+        "session_id": session_id,
+        "question_id": question_id,
+        "text": text,
+        "queue_position": queue_position,
+        "queue_depth": queue_depth,
+    }
+
+
+def answer_queue_overflow(session_id: str, question_id: str, text: str) -> dict:
+    """The bounded queue (see `_MAX_QUEUED_TURNS`) was already full — this
+    finalized question was not queued and will not be answered. Emitted
+    so Swift can say so honestly instead of the question silently
+    vanishing."""
+    return {"session_id": session_id, "question_id": question_id, "text": text}
+
+
+def answer_dequeued(session_id: str, question_id: str, queue_depth: int) -> dict:
+    """A previously queued turn just started generating — `queue_depth`
+    is how many remain waiting behind it."""
+    return {"session_id": session_id, "question_id": question_id, "queue_depth": queue_depth}
+
+
+# MARK: - Answer latency diagnostics (Section 17)
+#
+# Opt-in only (`VEYA_ANSWER_TIMING_DIAGNOSTICS=1`) — raw epoch-second
+# timestamps for one answer round, never shown in the normal interview
+# UI. Lets a developer diagnostics view and the local benchmark script
+# (`core/scripts/benchmark_answer_latency.py`) measure real
+# time-to-first-token/completion instead of guessing.
+
+
+def answer_timing(
+    session_id: str,
+    question_id: str,
+    stabilized_at: float,
+    generation_request_start: float,
+    first_token_at: Optional[float],
+    sequence: int = 1,
+    completed_at: Optional[float] = None,
+) -> dict:
+    return {
+        "session_id": session_id,
+        "question_id": question_id,
+        "sequence": sequence,
+        "stabilized_at": stabilized_at,
+        "generation_request_start": generation_request_start,
+        "first_token_at": first_token_at,
+        "completed_at": completed_at,
     }
 
 

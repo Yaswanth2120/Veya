@@ -39,9 +39,38 @@ struct VADDiagnosticsView: View {
                 }
                 .frame(maxHeight: 160)
             }
+
+            Divider()
+            Text("ANSWER LATENCY").font(.caption2.bold()).foregroundStyle(.secondary)
+            if conversationState.answerTimingSamples.isEmpty {
+                Text("No samples yet. Set VEYA_ANSWER_TIMING_DIAGNOSTICS=1 in the worker's environment to populate this.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(conversationState.answerTimingSamples.suffix(10)) { sample in
+                        timingRow(for: sample)
+                    }
+                }
+            }
         }
         .padding(10)
         .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func timingRow(for sample: ConversationState.AnswerTimingSample) -> some View {
+        HStack(spacing: 8) {
+            Text("first token")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(sample.firstTokenLatencySeconds.map { String(format: "%.2fs", $0) } ?? "—")
+                .font(.caption2.monospaced())
+            Text("total")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(sample.totalLatencySeconds.map { String(format: "%.2fs", $0) } ?? "—")
+                .font(.caption2.monospaced())
+        }
     }
 
     private var pipelineSummary: some View {

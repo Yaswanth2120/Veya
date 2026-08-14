@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 from .answer_generation import generate_answer
@@ -54,6 +55,27 @@ _FINAL_ANSWER_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 # it as finished anyway — short enough to feel responsive, long enough
 # that a fragment that's merely mid-utterance isn't answered prematurely.
 _SPECULATIVE_FINALIZE_DEBOUNCE_SECONDS = 0.7
+# Section 17: several interviewer questions can be spoken in quick
+# succession (the reported failure mode was cancelling a still-generating
+# answer every time). This bounds the pending-turn queue so a burst of
+# questions is handled honestly (queued, in order) rather than either
+# silently dropped or allowed to grow unbounded.
+_MAX_QUEUED_TURNS = 3
+# Retrieval must never leave answer generation hanging — a slow/unavailable
+# embedding provider or vector store still lets an ungrounded answer start
+# immediately rather than the user staring at "Generating…" indefinitely.
+_RETRIEVAL_TIMEOUT_SECONDS = 3.0
+
+
+@dataclass
+class _QueuedTurn:
+    question_id: str
+    question_text: str
+    # When this turn was finalized/classified — the honest "stabilized
+    # question time" for latency diagnostics, captured at queue time
+    # rather than dequeue time (waiting in queue is not generation
+    # latency).
+    stabilized_at: float
 
 
 class ConversationOrchestrator:
@@ -66,6 +88,7 @@ class ConversationOrchestrator:
         question_detector: Optional[QuestionDetector] = None,
         retriever: Optional[KnowledgeRetriever] = None,
         memory_texts: Optional[list[str]] = None,
+        emit_timing_diagnostics: bool = False,
     ) -> None:
         self.session_id = session_id
         self._session_context = session_context
@@ -101,11 +124,16 @@ class ConversationOrchestrator:
         # answer. Purely a decision-maker (see question_candidate_tracker.py)
         # — this class does all the actual event emission/generation.
         self._candidate_tracker = QuestionCandidateTracker(self._detector)
-        # The question_id of whatever draft/generation is currently
-        # active, if any — lets a finalize-triggered regeneration reuse
+        # The question_id of a speculative draft actually started for the
+        # CURRENTLY open interviewer turn, if any — scoped strictly to
+        # that one turn (reset whenever a new turn begins or the current
+        # one finalizes/rejects) so it never leaks into a later, unrelated
+        # turn's decisions. Lets a finalize-triggered regeneration reuse
         # the same id (so Swift can recognize "this is the same evolving
         # question, not a new one") instead of minting a fresh one.
-        self._draft_question_id: Optional[str] = None
+        # Distinct from `_active_answer_task`, which may belong to an
+        # entirely different, earlier turn still generating (Section 17).
+        self._current_turn_speculative_question_id: Optional[str] = None
         # Section 16: dual-input interview audio. `source` on every
         # transcript callback is one of "mixed" (single-track — today's
         # unchanged default and behavior), "meeting_audio" (separated-
@@ -122,6 +150,24 @@ class ConversationOrchestrator:
         # speech is treated exactly like separated-track "microphone"
         # speech: authoritative user context, never a draft trigger.
         self._user_speaking_suppressed = False
+        # Section 17: bounded FIFO of finalized interviewer turns waiting
+        # for the currently-active answer to finish — see `_enqueue_turn`/
+        # `_start_next_queued_turn_if_any`. Never mutated from outside
+        # `_process_finalized_turn`/those two methods.
+        self._answer_queue: list[_QueuedTurn] = []
+        # Guards against processing the exact same finalized turn twice in
+        # a row (e.g. a VAD-boundary finalize and the speculative-debounce
+        # finalize both firing for the same buffered text) — deliberately
+        # only compares against the immediately preceding turn, never a
+        # longer history, so a question genuinely repeated minutes later
+        # is never mistaken for a duplicate.
+        self._last_finalized_turn_text: Optional[str] = None
+        # Opt-in only (`VEYA_ANSWER_TIMING_DIAGNOSTICS=1`, see
+        # `dispatcher.py`) — real per-answer latency timestamps
+        # (stabilized/request-start/first-token/completed) for developer
+        # diagnostics and the local benchmark script only. Never shown in
+        # the normal interview UI.
+        self._emit_timing_diagnostics = emit_timing_diagnostics
 
     @property
     def answer_intelligence_available(self) -> bool:
@@ -219,6 +265,16 @@ class ConversationOrchestrator:
         stripped = pending_text.strip()
         if not stripped:
             return
+
+        was_open_turn = self._candidate_tracker.state in (
+            CandidateState.CANDIDATE, CandidateState.DRAFTING, CandidateState.STABILIZING,
+        )
+        if not was_open_turn:
+            # A brand-new turn is beginning — any speculative-draft id
+            # left over from a previous, now-finalized/rejected turn is
+            # no longer relevant to this one.
+            self._current_turn_speculative_question_id = None
+
         decision = self._candidate_tracker.on_pending_text_changed(stripped)
 
         if decision.emit_candidate:
@@ -227,13 +283,35 @@ class ConversationOrchestrator:
             await self._emit_event("question.updated", events.question_updated(session_id=self.session_id, text=decision.text))
 
         if decision.start_or_replace_draft:
-            had_active_draft = self._draft_question_id is not None
-            question_id = self._draft_question_id if (decision.is_replace and had_active_draft) else str(uuid.uuid4())
-            await self._start_answer_generation(
-                question_id=question_id, question_text=decision.text,
-                emit_draft_marker=True, is_replace=decision.is_replace, is_draft_stream=True,
-                exclude_current_question_from_context=False,
-            )
+            if decision.is_replace and self._current_turn_speculative_question_id is not None:
+                # Refining the SAME still-open turn's speculative draft —
+                # always safe to cancel-and-restart, this never competes
+                # with a different question.
+                await self._start_answer_generation(
+                    question_id=self._current_turn_speculative_question_id, question_text=decision.text,
+                    emit_draft_marker=True, is_replace=True, is_draft_stream=True,
+                    exclude_current_question_from_context=False,
+                )
+            elif self._active_answer_task is None and not self._answer_queue:
+                # A brand-new turn is beginning speculative drafting, and
+                # nothing else is active/queued — safe to start eagerly
+                # for latency.
+                question_id = str(uuid.uuid4())
+                self._current_turn_speculative_question_id = question_id
+                await self._start_answer_generation(
+                    question_id=question_id, question_text=decision.text,
+                    emit_draft_marker=True, is_replace=False, is_draft_stream=True,
+                    exclude_current_question_from_context=False,
+                )
+            else:
+                # Something else is already active/queued — speculatively
+                # drafting here would just be wasted work for a turn that
+                # hasn't even finalized yet. `on_finalize` queues it
+                # properly once/if it actually finalizes; undo the
+                # tracker's own DRAFTING transition so that later finalize
+                # doesn't wrongly believe a draft already exists for this
+                # text (see `note_draft_deferred`).
+                self._candidate_tracker.note_draft_deferred()
 
         if decision.state == CandidateState.DRAFTING:
             self._schedule_speculative_finalize()
@@ -287,9 +365,23 @@ class ConversationOrchestrator:
             await self._process_finalized_turn(finalized_turn)
 
     async def _process_finalized_turn(self, turn_text: str) -> bool:
-        """Returns `True` if this finalized turn started or is covered by
-        an active answer generation (so callers like `close()` know not
-        to immediately cancel it again right after)."""
+        """Returns `True` if this finalized turn started, is queued
+        behind, or is covered by an active answer generation (so callers
+        like `close()` know not to immediately cancel it again right
+        after)."""
+        stripped_turn_text = turn_text.strip()
+        # Section 17: two independent finalize paths (a real VAD boundary
+        # and the speculative-finalize debounce timer) can race for the
+        # same buffered text — `TurnAssembler` normally prevents this by
+        # returning `None` once consumed, but this is a cheap, explicit
+        # guard against ever producing two answers for one spoken turn.
+        # Scoped to only the *immediately preceding* turn so a question
+        # genuinely repeated minutes later is never mistaken for a
+        # duplicate.
+        if stripped_turn_text and stripped_turn_text == self._last_finalized_turn_text:
+            return False
+        self._last_finalized_turn_text = stripped_turn_text or self._last_finalized_turn_text
+
         self._remember_transcript(turn_text)
 
         # Only announce "classifying" when the (slower) semantic stage is
@@ -304,24 +396,31 @@ class ConversationOrchestrator:
         if not classification.is_answer_request:
             # A speculative draft may already be streaming for what just
             # turned out not to be a real answer request — never leave it
-            # visible/running.
-            if self._draft_question_id is not None:
-                cancelled_question_id = self._draft_question_id
+            # visible/running. Safe to cancel unconditionally: a
+            # speculative draft only ever starts when nothing else is
+            # active (see `_advance_candidate_tracker`), so this can only
+            # be cancelling this same rejected turn's own draft, never a
+            # different, still-wanted answer.
+            if self._current_turn_speculative_question_id is not None:
+                cancelled_question_id = self._current_turn_speculative_question_id
                 cancelled_sequence = self._sequence
                 await self.cancel_active_answer()
                 await self._emit_event(
                     "answer.cancelled",
                     events.answer_cancelled(session_id=self.session_id, question_id=cancelled_question_id, sequence=cancelled_sequence),
                 )
+                self._current_turn_speculative_question_id = None
             self._candidate_tracker.on_reject()
             if will_use_semantic_stage:
                 await self._emit_event("question.rejected", events.question_rejected(session_id=self.session_id))
             return False
 
+        stabilized_at = time.time()
         question_text = classification.normalized_question or turn_text
         decision = self._candidate_tracker.on_finalize(turn_text)
-        had_active_draft = self._draft_question_id is not None
-        question_id = self._draft_question_id if had_active_draft else str(uuid.uuid4())
+        had_active_draft = self._current_turn_speculative_question_id is not None
+        question_id = self._current_turn_speculative_question_id if had_active_draft else str(uuid.uuid4())
+        self._current_turn_speculative_question_id = None
 
         await self._emit_event(
             "question.finalized",
@@ -340,23 +439,88 @@ class ConversationOrchestrator:
             ),
         )
 
-        if decision.start_or_replace_draft:
-            # `emit_draft_marker`/`is_draft_stream` are False here: once a
-            # turn is finalized, this is the definitive generation — no
-            # further refinement is expected, so it streams as a plain
-            # `answer.delta`, not `answer.draft_delta`. `answer.draft_replaced`
-            # still fires when this supersedes a still-active speculative
-            # draft, so Swift knows to discard that draft's stale content.
+        if not decision.start_or_replace_draft:
+            # An already-active draft's text exactly matches the finalized
+            # text — nothing to regenerate; let it keep streaming to its
+            # own natural `answer.completed`.
+            return had_active_draft
+
+        if had_active_draft:
+            # `emit_draft_marker`/`is_replace` True: this supersedes a
+            # still-active speculative draft for the SAME turn — no
+            # competing answer, always safe to cancel-and-replace.
             await self._start_answer_generation(
                 question_id=question_id, question_text=question_text,
-                emit_draft_marker=had_active_draft, is_replace=had_active_draft, is_draft_stream=False,
+                emit_draft_marker=True, is_replace=True, is_draft_stream=False, stabilized_at=stabilized_at,
             )
             return True
 
-        # An already-active draft's text exactly matches the finalized
-        # text — nothing to regenerate; let it keep streaming to its own
-        # natural `answer.completed`.
-        return had_active_draft
+        if self._active_answer_task is not None:
+            # A genuinely different, still-generating answer is active —
+            # the fix for "a newer question cancels the still-running
+            # answer": queue this turn instead, preserving order.
+            await self._enqueue_turn(question_id=question_id, question_text=question_text, stabilized_at=stabilized_at)
+            return True
+
+        await self._start_answer_generation(
+            question_id=question_id, question_text=question_text,
+            emit_draft_marker=False, is_replace=False, is_draft_stream=False, stabilized_at=stabilized_at,
+        )
+        return True
+
+    async def _enqueue_turn(self, question_id: str, question_text: str, stabilized_at: Optional[float] = None) -> None:
+        if len(self._answer_queue) >= _MAX_QUEUED_TURNS:
+            await self._emit_event(
+                "answer.queue_overflow",
+                events.answer_queue_overflow(session_id=self.session_id, question_id=question_id, text=question_text),
+            )
+            return
+        self._answer_queue.append(
+            _QueuedTurn(question_id=question_id, question_text=question_text, stabilized_at=stabilized_at or time.time())
+        )
+        await self._emit_event(
+            "answer.queued",
+            events.answer_queued(
+                session_id=self.session_id, question_id=question_id, text=question_text,
+                queue_position=len(self._answer_queue), queue_depth=len(self._answer_queue),
+            ),
+        )
+
+    async def _start_next_queued_turn_if_any(self) -> None:
+        if not self._answer_queue:
+            return
+        next_turn = self._answer_queue.pop(0)
+        await self._emit_event(
+            "answer.dequeued",
+            events.answer_dequeued(session_id=self.session_id, question_id=next_turn.question_id, queue_depth=len(self._answer_queue)),
+        )
+        await self._start_answer_generation(
+            question_id=next_turn.question_id, question_text=next_turn.question_text,
+            emit_draft_marker=False, is_replace=False, is_draft_stream=False, stabilized_at=next_turn.stabilized_at,
+        )
+
+    async def retry_failed_answer(self, question_id: str, question_text: str) -> None:
+        """Explicit, user-initiated retry after a failed/timed-out
+        generation (Section 17) — re-runs generation for the same
+        already-classified question through the normal start-or-queue
+        path, never bypassing the "one active generation" rule."""
+        if self._active_answer_task is not None:
+            await self._enqueue_turn(question_id=question_id, question_text=question_text)
+            return
+        await self._start_answer_generation(
+            question_id=question_id, question_text=question_text,
+            emit_draft_marker=False, is_replace=False, is_draft_stream=False,
+        )
+
+    async def skip_active_answer(self) -> None:
+        """Explicit, user-initiated "Skip current answer" — never
+        triggered automatically. Cancels whatever is actively generating
+        and immediately starts the next queued turn, if any, rather than
+        leaving the queue stalled behind an answer the user no longer
+        wants to wait for."""
+        await self.cancel_active_answer()
+        self._current_turn_speculative_question_id = None
+        await self._start_next_queued_turn_if_any()
 
     def _remember_transcript(self, text: str) -> None:
         self._recent_transcript_fragments.append(text.strip())
@@ -379,14 +543,17 @@ class ConversationOrchestrator:
     async def _start_answer_generation(
         self, question_id: str, question_text: str, *, emit_draft_marker: bool = False, is_replace: bool = False,
         is_draft_stream: bool = False, exclude_current_question_from_context: bool = True,
+        stabilized_at: Optional[float] = None,
     ) -> None:
-        # A new question always supersedes whatever answer was still
-        # generating — only one active generation per session at a time.
+        # Callers only ever invoke this when cancelling is either correct
+        # (replacing a speculative draft for this SAME turn) or a no-op
+        # (nothing else active) — a genuinely different, still-generating
+        # answer is queued by the caller instead of ever reaching here.
         await self.cancel_active_answer()
-        self._draft_question_id = question_id
 
         self._sequence += 1
         sequence = self._sequence
+        generation_request_start = time.time()
 
         if emit_draft_marker:
             marker_name = "answer.draft_replaced" if is_replace else "answer.draft_started"
@@ -396,7 +563,12 @@ class ConversationOrchestrator:
         retrieved: list[RetrievedChunk] = []
         if self._retriever is not None:
             try:
-                retrieved = await self._retriever.retrieve(self.session_id, question_text)
+                retrieved = await asyncio.wait_for(
+                    self._retriever.retrieve(self.session_id, question_text), timeout=_RETRIEVAL_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                logger.error("Retrieval timed out after %.1fs; proceeding without document context", _RETRIEVAL_TIMEOUT_SECONDS)
+                retrieved = []
             except Exception as exc:  # noqa: BLE001 - retrieval failing must never block answer generation
                 logger.error("Unhandled %s during retrieval; proceeding without document context", type(exc).__name__)
                 retrieved = []
@@ -420,18 +592,25 @@ class ConversationOrchestrator:
                 prompt=prompt,
                 retrieved=retrieved,
                 is_draft_stream=is_draft_stream,
+                stabilized_at=stabilized_at or generation_request_start,
+                generation_request_start=generation_request_start,
             )
         )
 
     async def _run_answer_generation(
-        self, sequence: int, question_id: str, question_text: str, prompt: str, retrieved: list[RetrievedChunk], is_draft_stream: bool = False,
+        self, sequence: int, question_id: str, question_text: str, prompt: str, retrieved: list[RetrievedChunk],
+        is_draft_stream: bool = False, stabilized_at: float = 0.0, generation_request_start: float = 0.0,
     ) -> None:
         await self._emit_event(
             "answer.started",
             events.answer_started(session_id=self.session_id, sequence=sequence, question_id=question_id),
         )
 
+        first_token_at: list[float] = []
+
         async def on_delta(delta: str) -> None:
+            if not first_token_at:
+                first_token_at.append(time.time())
             await self._emit_event(
                 "answer.delta",
                 events.answer_delta(
@@ -447,16 +626,22 @@ class ConversationOrchestrator:
         try:
             parsed = await generate_answer(self._llm_provider, prompt, on_delta=on_delta)
         except asyncio.CancelledError:
+            # Superseded by a same-turn replace (see `_start_answer_generation`)
+            # — the caller that cancelled us already owns `_active_answer_task`
+            # and any dequeue decision; this task must never touch either.
             raise
         except LLMError as exc:
             logger.error("Unhandled %s during answer generation", type(exc).__name__)
             await self._emit_generation_failed(sequence=sequence, question_id=question_id, question_text=question_text)
+            await self._finish_active_generation()
             return
         except Exception as exc:  # noqa: BLE001 - never let a raw exception escape, never log its message
             logger.error("Unhandled %s during answer generation", type(exc).__name__)
             await self._emit_generation_failed(sequence=sequence, question_id=question_id, question_text=question_text)
+            await self._finish_active_generation()
             return
 
+        completed_at = time.time()
         await self._emit_event(
             "answer.completed",
             events.answer_completed(
@@ -470,13 +655,35 @@ class ConversationOrchestrator:
                 caveat=parsed.caveat,
             ),
         )
+        if self._emit_timing_diagnostics:
+            await self._emit_event(
+                "answer.timing",
+                events.answer_timing(
+                    session_id=self.session_id, sequence=sequence, question_id=question_id,
+                    stabilized_at=stabilized_at, generation_request_start=generation_request_start,
+                    first_token_at=first_token_at[0] if first_token_at else None,
+                    completed_at=completed_at,
+                ),
+            )
+        await self._finish_active_generation()
+
+    async def _finish_active_generation(self) -> None:
+        """Called at the true end of a generation round that reached
+        `answer.completed` (success or handled failure) — never on
+        cancellation, whose caller already owns this bookkeeping. Frees
+        the "one active generation" slot and immediately starts the next
+        queued turn, if any, so a burst of questions is worked through in
+        order rather than needing a fresh trigger."""
+        self._active_answer_task = None
+        await self._start_next_queued_turn_if_any()
 
     async def _emit_generation_failed(self, sequence: int, question_id: str, question_text: str) -> None:
-        # There is no dedicated failure event in this section's protocol —
-        # `answer.completed` is the one way a generation round always
-        # ends, success or not, so streaming Swift state never hangs on
-        # "Generating answer…" forever. The message is an honest status
-        # note, never a fabricated answer.
+        # `answer.completed` (with `is_failed=True`) is still the one way
+        # a generation round always ends, success or not, so streaming
+        # Swift state never hangs on "Generating answer…" forever — but
+        # `is_failed` lets Swift tell a real answer apart from this status
+        # note and preserve whatever completed answer was already
+        # visible, rather than overwriting it with a failure message.
         await self._emit_event(
             "answer.completed",
             events.answer_completed(
@@ -488,6 +695,7 @@ class ConversationOrchestrator:
                 talking_points=[],
                 sources=[],
                 caveat="",
+                is_failed=True,
             ),
         )
 
@@ -525,6 +733,13 @@ class ConversationOrchestrator:
         if finalized_user_turn is not None:
             self._recent_user_answer_text = finalized_user_turn
             self._remember_transcript(finalized_user_turn)
+
+        # Any still-queued turns are dropped, not worked through — a
+        # session ending is a deliberate stop, not a pause. Cleared before
+        # the wait below so the active task's own completion callback
+        # (`_finish_active_generation`) finds nothing to dequeue and
+        # doesn't start yet another generation during shutdown.
+        self._answer_queue.clear()
 
         # Whatever is active at this point — started by the flush above,
         # by `TranscriptionSession.close()`'s own callback moments ago, or

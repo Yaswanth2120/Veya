@@ -1023,6 +1023,88 @@ class AnswerCancelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.code, ErrorCode.NOT_RUNNING)
         await context.close_transcription_session_if_running()
 
+
+class AnswerSkipTests(unittest.IsolatedAsyncioTestCase):
+    """`answer.skip` — the explicit "Skip current answer" control. Kept
+    separate from `answer.cancel` (used for session-teardown cleanup,
+    which must never advance the queue)."""
+
+    async def test_without_an_active_conversation_orchestrator_is_not_running(self):
+        context, _ = make_context()
+        with self.assertRaises(ProtocolError) as ctx:
+            await Dispatcher().dispatch(Request(id="1", method="answer.skip", params={"session_id": "s1"}), context)
+        self.assertEqual(ctx.exception.code, ErrorCode.NOT_RUNNING)
+
+    async def test_skip_with_no_active_answer_is_a_harmless_no_op(self):
+        context, _ = make_context(llm_provider_factory=_AvailableLLMProvider)
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        await dispatcher.dispatch(
+            Request(
+                id="2",
+                method="transcription.start",
+                params={"session_id": "s1", "sample_rate_hz": 16000, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+
+        result = await dispatcher.dispatch(Request(id="3", method="answer.skip", params={"session_id": "s1"}), context)
+
+        self.assertEqual(result, {"ok": True})
+        await context.close_transcription_session_if_running()
+
+
+class AnswerRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_without_an_active_conversation_orchestrator_is_not_running(self):
+        context, _ = make_context()
+        with self.assertRaises(ProtocolError) as ctx:
+            await Dispatcher().dispatch(
+                Request(id="1", method="answer.retry", params={"session_id": "s1", "question_id": "q1", "question_text": "Why?"}),
+                context,
+            )
+        self.assertEqual(ctx.exception.code, ErrorCode.NOT_RUNNING)
+
+    async def test_missing_question_text_is_invalid_params(self):
+        context, _ = make_context(llm_provider_factory=_AvailableLLMProvider)
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        await dispatcher.dispatch(
+            Request(
+                id="2", method="transcription.start",
+                params={"session_id": "s1", "sample_rate_hz": 16000, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+
+        with self.assertRaises(ProtocolError) as ctx:
+            await dispatcher.dispatch(
+                Request(id="3", method="answer.retry", params={"session_id": "s1", "question_id": "q1"}), context
+            )
+        self.assertEqual(ctx.exception.code, ErrorCode.INVALID_PARAMS)
+        await context.close_transcription_session_if_running()
+
+    async def test_retry_starts_a_fresh_generation_for_the_given_question(self):
+        context, _ = make_context(llm_provider_factory=_AvailableLLMProvider)
+        dispatcher = Dispatcher()
+        await dispatcher.dispatch(Request(id="1", method="session.start", params={"session_id": "s1"}), context)
+        await dispatcher.dispatch(
+            Request(
+                id="2", method="transcription.start",
+                params={"session_id": "s1", "sample_rate_hz": 16000, "channels": 1, "encoding": "pcm_s16le"},
+            ),
+            context,
+        )
+
+        result = await dispatcher.dispatch(
+            Request(
+                id="3", method="answer.retry",
+                params={"session_id": "s1", "question_id": "q1", "question_text": "Tell me about yourself."},
+            ),
+            context,
+        )
+        self.assertEqual(result, {"ok": True})
+        await context.close_transcription_session_if_running()
+
     async def test_worker_shutdown_also_closes_an_active_transcription_session(self):
         context, _ = make_context()
         dispatcher = Dispatcher()

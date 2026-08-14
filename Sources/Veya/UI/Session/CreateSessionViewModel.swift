@@ -15,7 +15,12 @@ final class CreateSessionViewModel: ObservableObject {
     @Published var roleOrTopic = ""
     @Published var sessionDescription = ""
     @Published var expectedParticipants = ""
-    @Published var sessionType: SessionType = .meeting
+    /// Section 17: Create Session is interview-only now — every session
+    /// created through this screen uses `.interviewPractice`, no longer a
+    /// user-facing choice. `SessionType`'s other cases are not removed —
+    /// old, already-persisted sessions of those types still read back and
+    /// function correctly in `LiveSessionView`/`CopilotWorkbenchView`.
+    @Published var sessionType: SessionType = .interviewPractice
     @Published var notes = ""
     @Published var preferredAnswerStyle: AnswerStyle = .concise
     @Published var preferredProgrammingLanguage = ""

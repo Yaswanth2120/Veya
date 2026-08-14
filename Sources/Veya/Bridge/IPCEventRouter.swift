@@ -192,12 +192,42 @@ final class IPCEventRouter {
             else { return }
             state.setPartialAnswer(data.delta)
 
+        case "answer.queued":
+            guard let data: AnswerQueuedEventData = decode(event, matching: \.sessionId) else { return }
+            state.setQueuedQuestionsCount(data.queueDepth)
+
+        case "answer.dequeued":
+            guard let data: AnswerDequeuedEventData = decode(event, matching: \.sessionId) else { return }
+            state.setQueuedQuestionsCount(data.queueDepth)
+
+        case "answer.queue_overflow":
+            guard let data: AnswerQueueOverflowEventData = decode(event, matching: \.sessionId) else { return }
+            state.noteQueueOverflow(data.text)
+
+        case "answer.timing":
+            guard let data: AnswerTimingEventData = decode(event, matching: \.sessionId) else { return }
+            state.recordAnswerTiming(
+                ConversationState.AnswerTimingSample(
+                    stabilizedAt: Date(timeIntervalSince1970: data.stabilizedAt),
+                    generationRequestStart: Date(timeIntervalSince1970: data.generationRequestStart),
+                    firstTokenAt: data.firstTokenAt.map { Date(timeIntervalSince1970: $0) },
+                    completedAt: data.completedAt.map { Date(timeIntervalSince1970: $0) }
+                )
+            )
+
         case "answer.completed":
             guard let data: AnswerCompletedEventData = decode(event, matching: \.sessionId),
                   data.sequence == currentAnswerSequence,
                   let sessionUUID = UUID(uuidString: data.sessionId),
                   let questionUUID = UUID(uuidString: data.questionId)
             else { return }
+            if data.isFailed == true {
+                state.ingestAnswerFailure(
+                    data.answerText ?? "Answer generation failed.",
+                    questionID: data.questionId, questionText: data.question
+                )
+                return
+            }
             var talkingPoints = data.talkingPoints
             if !data.caveat.isEmpty {
                 talkingPoints.append("Caveat: \(data.caveat)")

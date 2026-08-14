@@ -68,4 +68,21 @@ struct CreateSessionViewModelTests {
         let viewModel = CreateSessionViewModel()
         #expect(viewModel.startWithoutResume == false)
     }
+
+    @Test("Create Session is interview-only: sessionType always defaults to interviewPractice")
+    func sessionTypeDefaultsToInterviewPractice() {
+        let viewModel = CreateSessionViewModel()
+        #expect(viewModel.sessionType == .interviewPractice)
+    }
+
+    @Test("old, non-interview session types still exist for reading already-persisted sessions")
+    func otherSessionTypesAreNotDeleted() {
+        // Create Session no longer offers these, but old sessions of
+        // these types must still decode/display correctly elsewhere
+        // (LiveSessionView, CopilotWorkbenchView, dashboards).
+        let stillPresent: [SessionType] = [.presentation, .meeting, .clientCall, .technicalMeeting, .codingPractice, .systemDesign]
+        for type in stillPresent {
+            #expect(SessionType.allCases.contains(type))
+        }
+    }
 }
