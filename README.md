@@ -16,11 +16,14 @@ The active Create Session experience is intentionally **interview-only**. New se
 4. In microphone-only mode, use **I'm answering** / `⌘⇧A` while the candidate speaks. This stores that speech as authoritative personal context and prevents it from becoming a new interviewer question.
 5. For separated tracks, opt in to **Meeting Audio** during a live session, grant Screen Recording permission, and select the meeting application. This is intended for Zoom, Meet, or Teams, but real-platform capture is still a manual verification requirement.
 
+Non-speech transcript content (`[BLANK_AUDIO]`, `(soft music)`, `(wind blowing)`, etc.) is rejected before it ever reaches the transcript, question detection, or an answer prompt — via a shared eligibility layer (`core/veya/conversation/transcript_eligibility.py`) used by both real transcription paths. A compound interviewer question ("What was the bottleneck, and how did you reduce the latency?") stays one finalized question, not two — a natural mid-question pause no longer trips premature turn-splitting. A queued question's answer context is captured at the moment *that* question finalizes, so another question finalizing later while it waits never leaks into its prompt. A structured groundedness guard (`core/veya/conversation/groundedness.py`) catches a self-contradictory numeric claim (e.g. "35% to 35%") or a specific percentage unsupported by the real retrieved/memory/spoken context, and substitutes an honest "I don't have enough verified context" answer instead.
+
 ### Current limitations
 
-- The microphone-only flow cannot reliably identify speakers automatically; the candidate must use **I'm answering** when speaking.
+- The microphone-only flow cannot reliably identify speakers automatically; the candidate must use **I'm answering** when speaking. No diarization model is used or claimed.
 - Interviewer-turn scheduling is bounded: active answers are preserved and up to three later questions are queued rather than cancelling an answer. Queue overflow is shown explicitly.
 - Answer text is streamed through a clean-speech filter (`SpeakableAnswerStream`) that strips `<think>`/reasoning blocks and protocol labels before anything reaches Swift, and Ollama is asked to skip its reasoning pass outright (`think: false`, version-gated with a real fallback) when the connected Ollama instance supports it. Measured against the currently configured local model (`qwen3:1.7b`) on this machine: median first *usable* (clean, speakable) answer text was **0.25s**, p95 **3.63s** (the p95 outlier was model/Ollama warm-up on the first request of a run, not steady-state); median total completion was **4.43s**, p95 **7.35s**. These are real measurements from `core/scripts/benchmark_answer_latency.py`, not targets — re-run it locally to reproduce on your own hardware/model.
+- The groundedness guard is deliberately narrow (self-contradictory/unsupported percentages, matched against real context text) — it is not a general fact-checker and will not catch every possible fabrication.
 - Physical microphone, Zoom, Google Meet, and Teams capture have not yet been manually verified end-to-end.
 - The coding and system-design subsystems remain in the repository but are not part of the current Create Session product flow.
 
@@ -131,8 +134,8 @@ open .build/package/Veya.app     # or right-click > Open — it's unsigned
 
 ## Testing
 
-- **Python**: 433 tests, with no `ResourceWarning`s under `-W error::ResourceWarning`; four opt-in real-model/manual suites are skipped by default.
-- **Swift**: 216 tests across the Swift test suites.
+- **Python**: 465 tests, with no `ResourceWarning`s under `-W error::ResourceWarning`; four opt-in real-model/manual suites are skipped by default.
+- **Swift**: 223 tests across the Swift test suites.
 - The suite covers IPC, transcription lifecycle, answer queueing/failure preservation, document-readiness gating, memory, reports, and real-worker subprocess flows. It does **not** substitute for physical microphone or meeting-platform acceptance testing.
 - Run the checks with:
 
