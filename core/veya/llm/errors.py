@@ -29,3 +29,7 @@ class LLMProviderError(LLMError):
     """The provider was reachable but returned an error or malformed
     response for a specific request (as opposed to being unavailable
     entirely)."""
+
+
+class LLMContextError(LLMProviderError):
+    """A prompt cannot fit safely; no request was sent."""

@@ -36,14 +36,14 @@ from .turn_assembler import TurnAssembler
 from ..ipc import events
 from ..knowledge.models import RetrievedChunk
 from ..knowledge.retrieval import KnowledgeRetriever, chunk_sources
-from ..llm.errors import LLMError
+from ..llm.errors import LLMContextError, LLMError
 from ..llm.provider import LLMProvider
 
 logger = logging.getLogger("veya.conversation")
 
 EmitEvent = Callable[[str, dict], Awaitable[None]]
 
-_GENERATION_FAILED_MESSAGE = "Answer generation failed — the local LLM provider became unavailable mid-response."
+_GENERATION_FAILED_MESSAGE = "Answer generation failed. Check the selected AI backend and retry."
 _NO_USABLE_TEXT_MESSAGE = "Answer generation finished without producing any speakable answer text."
 # Section 18: how long to wait after a generation starts before warning
 # that no clean, speakable text has arrived yet (a slow/reasoning model
@@ -594,6 +594,18 @@ class ConversationOrchestrator:
             recent_conversation_block=next_turn.recent_conversation_block,
         )
 
+    async def answer_typed_question(self, question_id: str, question_text: str) -> None:
+        recent = self._recent_conversation_block(exclude_current_question=False)
+        self._remember_transcript(question_text)
+        if self._active_answer_task is not None:
+            await self._enqueue_turn(question_id=question_id, question_text=question_text, recent_conversation_block=recent)
+            return
+        await self._start_answer_generation(
+            question_id=question_id, question_text=question_text,
+            emit_draft_marker=False, is_replace=False, is_draft_stream=False,
+            recent_conversation_block=recent,
+        )
+
     async def retry_failed_answer(self, question_id: str, question_text: str) -> None:
         """Explicit, user-initiated retry after a failed/timed-out
         generation (Section 17) — re-runs generation for the same
@@ -768,10 +780,16 @@ class ConversationOrchestrator:
             # and any dequeue decision; this task must never touch either.
             warning_task.cancel()
             raise
+        except LLMContextError as exc:
+            warning_task.cancel()
+            await self._emit_generation_failed(sequence=sequence, question_id=question_id, question_text=question_text, message=exc.reason)
+            await self._finish_active_generation()
+            return
         except LLMError as exc:
             warning_task.cancel()
             logger.error("Unhandled %s during answer generation", type(exc).__name__)
-            await self._emit_generation_failed(sequence=sequence, question_id=question_id, question_text=question_text)
+            await self._emit_generation_failed(sequence=sequence, question_id=question_id, question_text=question_text,
+                message=exc.reason if getattr(self._llm_provider, "safe_error_messages", False) else _GENERATION_FAILED_MESSAGE)
             await self._finish_active_generation()
             return
         except Exception as exc:  # noqa: BLE001 - never let a raw exception escape, never log its message

@@ -195,11 +195,17 @@ struct WhisperModelManagerTests {
 
     @Test("an explicit VEYA_WHISPER_MODEL_MANIFEST_PATH override wins, and its hash matches the real referenced file")
     func explicitManifestPathOverrideWinsAndIsGenuinelyVerified() throws {
-        let manifestPath = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // VeyaTests/
-            .deletingLastPathComponent() // Tests/
-            .deletingLastPathComponent() // <repo root>
-            .appendingPathComponent("packaging/whisper_model_manifest.example.json").path
+        let directory = makeCacheDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixtureURL = directory.appendingPathComponent("fixture.bin")
+        let payload = Data("self-contained model manifest fixture".utf8)
+        try payload.write(to: fixtureURL)
+        let fixture = WhisperModelManifestEntry(id: "for-tests-ggml-base.en", url: fixtureURL,
+            sha256: sha256Hex(payload), architecture: "arm64", sizeBytes: Int64(payload.count), version: "1")
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        try JSONEncoder().encode(fixture).write(to: manifestURL)
+        let manifestPath = manifestURL.path
         let entry = WhisperModelManifest.recommended(environment: ["VEYA_WHISPER_MODEL_MANIFEST_PATH": manifestPath])
         #expect(entry != nil)
         #expect(entry?.id == "for-tests-ggml-base.en")

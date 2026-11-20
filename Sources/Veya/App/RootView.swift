@@ -24,6 +24,22 @@ struct RootView: View {
                 content
             }
         }
+        .safeAreaInset(edge: .top) {
+            if coordinator.isEndingSession {
+                HStack { ProgressView().controlSize(.small); Text("Finishing the previous session…").font(.caption) }
+                    .padding(8)
+            }
+            if coordinator.route != .liveSession, coordinator.currentSession != nil {
+                HStack {
+                    Text("A session is still running.").font(.caption)
+                    Spacer()
+                    Button("Return to Live Session") { coordinator.route = .liveSession }
+                    Button("End Session") { coordinator.endLiveSession() }
+                }
+                .padding(10)
+                .background(.bar)
+            }
+        }
         .confirmationDialog(
             privacyPromptTitle,
             isPresented: privacyPromptBinding,
@@ -35,7 +51,7 @@ struct RootView: View {
             Text(privacyPromptMessage(for: prompt))
         }
         .alert(
-            "Presenter Privacy",
+            "Veya",
             isPresented: lastActionErrorBinding,
             presenting: coordinator.lastActionError
         ) { _ in

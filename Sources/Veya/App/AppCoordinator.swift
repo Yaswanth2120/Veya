@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Carbon.HIToolbox
 
 /// Top-level navigation + lifecycle owner: which screen is showing, the
@@ -20,9 +21,12 @@ final class AppCoordinator: ObservableObject {
         case localAIStatus
     }
 
-    @Published var route: Route = .dashboard
+    @Published var route: Route = .dashboard {
+        didSet { if route != .liveSession { overlayWindowController?.hide() } }
+    }
     @Published private(set) var currentSession: Session?
     @Published private(set) var conversationState: ConversationState?
+    @Published private(set) var isEndingSession = false
     @Published var pendingPrivacyPrompt: LiveSessionPrivacyPrompt?
     @Published var lastActionError: String?
 
@@ -145,6 +149,15 @@ final class AppCoordinator: ObservableObject {
     }
 
     func startLiveSession(for session: Session) {
+        guard !isEndingSession else {
+            lastActionError = "The previous session is finishing. Try again in a moment."
+            return
+        }
+        guard currentSession == nil else {
+            route = .liveSession
+            lastActionError = "End the current session before starting another."
+            return
+        }
         var startedSession = session
         startedSession.status = .live
         currentSession = startedSession
@@ -158,7 +171,7 @@ final class AppCoordinator: ObservableObject {
         presenterPrivacyManager.overlayWindowDidBecomeAvailable()
 
         route = .liveSession
-        overlay.show()
+        if !NSApp.isActive { overlay.show() }
 
         Task {
             await pythonIntelligenceCoordinator.beginLiveSession(state: state, session: startedSession)
@@ -173,7 +186,11 @@ final class AppCoordinator: ObservableObject {
             session.status = .ended
             session.endedAt = Date()
             Task { try? await sessionRepository.update(session) }
-            Task { await pythonIntelligenceCoordinator.endLiveSession(sessionID: session.id) }
+            isEndingSession = true
+            Task {
+                await pythonIntelligenceCoordinator.endLiveSession(sessionID: session.id)
+                isEndingSession = false
+            }
             Task { await generateSessionReport(sessionID: session.id) }
         }
 

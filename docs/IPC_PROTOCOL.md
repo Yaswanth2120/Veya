@@ -298,3 +298,18 @@ Then paste JSON Lines requests on stdin, e.g.:
 
 See `pipeline.py`'s header comment for why that file is unrelated legacy
 experimentation, not the real worker.
+
+### Typed questions and GPU inference
+
+`conversation.start_text` accepts `{session_id}` for an existing session.
+It checks the selected inference provider, creates the same conversation
+orchestrator used by transcription, and stops any mock feed. No Whisper
+binary is required. `answer.ask` accepts `{session_id, text}` (1–4000
+characters), starts text mode if needed, emits `question.detected`, and
+uses normal queued, grounded, streaming answer events. `session.stop`
+closes typed-mode orchestration too. Neither RPC logs the text.
+
+`system.llm_status` additionally returns `provider: "vast"`,
+`remote_processing: true`, and `context_window` for the GPU provider. Old
+clients can ignore these optional fields. Embeddings are configured
+independently and remain local Ollama by default.

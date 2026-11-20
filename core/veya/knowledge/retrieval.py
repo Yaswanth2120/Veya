@@ -79,7 +79,9 @@ class KnowledgeRetriever:
         lines = ["Supporting context from the user's session documents (use only for document-specific claims):"]
         budget = self._config.max_context_characters
         for item in retrieved:
-            excerpt = item.chunk.excerpt[: self._config.max_excerpt_length]
+            # Display excerpts are intentionally short; generation needs
+            # the bounded passage whose full text was actually embedded.
+            excerpt = item.chunk.text[: self._config.max_chunk_context_characters]
             line = f"- [{item.chunk.file_name}] {excerpt}"
             if budget - len(line) < 0:
                 break

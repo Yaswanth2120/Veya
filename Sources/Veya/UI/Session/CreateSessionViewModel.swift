@@ -31,6 +31,13 @@ final class CreateSessionViewModel: ObservableObject {
     @Published var attachedDocuments: [PendingDocument] = []
     @Published var isFileImporterPresented = false
     @Published var errorMessage: String?
+    @Published private(set) var isSaving = false
+
+    var validationMessage: String? {
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter an interview title." }
+        if !hasResumeDocument && !startWithoutResume { return "Attach a resume, or enable Start without resume." }
+        return nil
+    }
     /// Section 16: Interview Copilot requires a resume before starting
     /// unless the user explicitly opts out — mirrors
     /// `InterviewPreflightStatus.resumeRequired`.
@@ -58,6 +65,7 @@ final class CreateSessionViewModel: ObservableObject {
         switch result {
         case .success(let urls):
             for url in urls {
+                guard !attachedDocuments.contains(where: { $0.fileName == url.lastPathComponent }) else { continue }
                 let didAccess = url.startAccessingSecurityScopedResource()
                 defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
 
@@ -68,7 +76,8 @@ final class CreateSessionViewModel: ObservableObject {
                         fileName: url.lastPathComponent,
                         fileExtension: url.pathExtension,
                         fileSizeBytes: size,
-                        sourceURL: url
+                        sourceURL: url,
+                        kind: hasResumeDocument ? .other : .resume
                     )
                 )
             }
@@ -81,6 +90,9 @@ final class CreateSessionViewModel: ObservableObject {
     /// Support (metadata + file copy only — no parsing), and returns the
     /// created session so the caller can start the live session.
     func save() async -> Session? {
+        guard !isSaving else { return nil }
+        isSaving = true
+        defer { isSaving = false }
         let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
         guard !trimmedTitle.isEmpty else {
             errorMessage = "Session title is required."

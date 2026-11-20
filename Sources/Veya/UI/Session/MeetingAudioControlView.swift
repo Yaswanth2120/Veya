@@ -4,10 +4,11 @@ import SwiftUI
 /// Section 16: the meeting/system-audio track's live controls — source
 /// selection (preferring a specific app over indiscriminate all-system
 /// audio), the one-time consent disclosure, a visible capture-active
-/// indicator, and a one-click stop control. Reachable only while a real
-/// transcription session is actually running (see `LiveSessionView`),
-/// since the meeting-audio track shares that session's orchestrator.
+/// indicator, and a one-click stop control. Available for real-transcription or typed
+/// sessions: the meeting track shares the conversation orchestrator and
+/// does not require an active microphone track.
 struct MeetingAudioControlView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var pythonIntelligenceCoordinator: PythonIntelligenceCoordinator
 
     @State private var availableApplications: [SelectableAudioApplication] = []
@@ -53,6 +54,14 @@ struct MeetingAudioControlView: View {
                 Text("Meeting audio unavailable — Screen Recording permission is required.")
                     .font(.caption2)
                     .foregroundStyle(.orange)
+                Button("Allow Meeting Audio…") {
+                    screenRecordingPermissionGranted = CGRequestScreenCaptureAccess()
+                    if !screenRecordingPermissionGranted {
+                        statusMessage = "Enable Veya in Screen & System Audio Recording. macOS may require reopening Veya afterward."
+                    }
+                    Task { await loadApplications() }
+                }
+                .font(.caption)
                 Button("Open Screen Recording Settings") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
                         NSWorkspace.shared.open(url)
@@ -60,9 +69,11 @@ struct MeetingAudioControlView: View {
                 }
                 .font(.caption)
                 Button("Re-check permission") {
-                    screenRecordingPermissionGranted = CGPreflightScreenCaptureAccess()
+                    Task { await loadApplications() }
                 }
                 .font(.caption)
+                Text("Enable Veya in Screen & System Audio Recording. If macOS requests it, reopen Veya after granting access.")
+                    .font(.caption2).foregroundStyle(.secondary)
             } else {
                 Button(isLoadingApplications ? "Loading applications…" : "Select meeting app…") {
                     Task { await loadApplications() }
@@ -70,7 +81,7 @@ struct MeetingAudioControlView: View {
                 .font(.caption)
                 .disabled(isLoadingApplications)
 
-                if !availableApplications.isEmpty {
+                if !isLoadingApplications {
                     Picker("Application", selection: $selectedApplication) {
                         Text("All system audio").tag(SelectableAudioApplication?.none)
                         ForEach(availableApplications) { app in
@@ -91,17 +102,31 @@ struct MeetingAudioControlView: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
+                if let error = pythonIntelligenceCoordinator.meetingAudioError {
+                    Text(error).font(.caption2).foregroundStyle(.orange)
+                }
             }
         }
         .padding(10)
         .background(.quaternary.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                screenRecordingPermissionGranted = CGPreflightScreenCaptureAccess()
+                if screenRecordingPermissionGranted && !pythonIntelligenceCoordinator.meetingAudioActive {
+                    Task { await loadApplications() }
+                }
+            }
+        }
+        .task {
+            if screenRecordingPermissionGranted { await loadApplications() }
+        }
         .alert("Transcribe meeting audio locally?", isPresented: $isShowingConsent) {
             Button("Cancel", role: .cancel) {}
             Button("Start") {
                 Task { await startCapture() }
             }
         } message: {
-            Text("Veya will transcribe the selected audio locally on this Mac — nothing is sent to the cloud. You're responsible for complying with any consent, workplace, and meeting-platform policies that apply to recording or transcribing this conversation.")
+            Text("Veya transcribes the selected audio on this Mac. With the GPU backend selected, questions and selected context are sent through your SSH tunnel for answers. Raw audio stays local.")
         }
     }
 
@@ -110,6 +135,8 @@ struct MeetingAudioControlView: View {
         defer { isLoadingApplications = false }
         do {
             availableApplications = try await SystemAudioCapture.selectableApplications()
+            screenRecordingPermissionGranted = true
+            statusMessage = nil
         } catch {
             statusMessage = "Couldn't list running applications — check Screen Recording permission."
             screenRecordingPermissionGranted = CGPreflightScreenCaptureAccess()
@@ -122,7 +149,7 @@ struct MeetingAudioControlView: View {
         }
         let started = await pythonIntelligenceCoordinator.beginMeetingAudioCapture(source: source)
         if !started {
-            statusMessage = "Couldn't start meeting audio capture."
+            statusMessage = pythonIntelligenceCoordinator.meetingAudioError ?? "Couldn't start meeting audio capture."
         } else {
             statusMessage = nil
         }

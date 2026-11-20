@@ -1,17 +1,24 @@
-# Python Worker Packaging (Release Plan)
+# Python worker packaging
 
-This phase (Section 6) does not package the Python worker for
-distribution — `PythonWorkerConfiguration.resolveDefault()` resolves
-`python3` dynamically via `/usr/bin/env` and locates `core/` via this
-project's own source tree. That's fine for development (`swift run`/
-`swift test` against a checkout of this repository) but not for a
-release build handed to a user who may not have Python installed, may
-have an incompatible version, or is launching the app as a GUI bundle
-with a minimal `PATH` that doesn't include Homebrew/pyenv/etc.
+## Current implementation
 
-This document is the executable release plan. Development still uses the
-checkout-relative worker configuration; the bundle wiring below is not yet
-implemented.
+`sh packaging/build_app.sh` builds a release Swift app, a copied Python venv,
+the worker package, and available local Whisper binaries. The default output
+is `~/Library/Caches/Veya/LocalBuild/Veya.app`; helper and bundle signatures
+are verified after ad-hoc signing. `VEYA_CODESIGN_IDENTITY` can select another
+identity. Runtime worker bytecode writes are disabled to preserve the seal.
+
+The app resolves its worker/runtime from bundle resources and stores session
+data and indexes in Application Support. The venv still relies on the build
+machine's Python/framework installation: this is a local development bundle,
+not a fully relocatable distribution or notarized release. Clean-machine
+packaging remains future work. See [validation](VALIDATION.md).
+
+## Historical design rationale and standalone-runtime plan
+
+The following explains the original development defaults and intended
+standalone-runtime design; it is not a claim that this entire release plan
+has been implemented.
 
 ## The problem with the dev-time defaults
 

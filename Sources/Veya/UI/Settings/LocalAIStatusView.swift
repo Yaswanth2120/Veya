@@ -10,8 +10,8 @@ struct LocalAIStatusView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             BackToDashboardButton()
-            Text("Local AI").font(.largeTitle.bold())
-            Text("Ollama powers question answering, coding/design assistance, and session reports; Whisper powers real transcription — all local, never a cloud API.")
+            Text("AI Backend").font(.largeTitle.bold())
+            Text("Choose local Ollama or your Vast GPU through the SSH tunnel. Audio transcription, document embeddings, and storage stay on this Mac. The GPU backend receives questions and selected document, memory, and conversation context to generate answers.")
                 .font(.caption).foregroundStyle(.secondary)
 
             LocalAIStatusCard(showsModelPicker: true)

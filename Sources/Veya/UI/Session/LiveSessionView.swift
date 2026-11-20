@@ -8,6 +8,8 @@ struct LiveSessionView: View {
     @State private var sessionDocuments: [SessionDocument] = []
     @State private var lastLLMStatus: LLMStatusResult?
     @State private var isCheckingLocalAI = false
+    @State private var typedQuestion = ""
+    @State private var isSubmittingQuestion = false
     private let documentRepository = SessionDocumentRepository()
 
     init(conversationState: ConversationState, pythonIntelligenceCoordinator: PythonIntelligenceCoordinator) {
@@ -20,6 +22,7 @@ struct LiveSessionView: View {
         VStack(alignment: .leading, spacing: 16) {
             header
             pipelineStatusStrip
+            typedQuestionInput
 
             HStack(alignment: .top, spacing: 20) {
                 VStack(alignment: .leading, spacing: 16) {
@@ -68,6 +71,30 @@ struct LiveSessionView: View {
         }
     }
 
+    private var typedQuestionInput: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                TextField("Type or paste a practice question…", text: $typedQuestion)
+                    .textFieldStyle(.roundedBorder)
+                Button(isSubmittingQuestion ? "Submitting…" : "Ask") {
+                    Task {
+                        isSubmittingQuestion = true
+                        if await pythonIntelligenceCoordinator.submitQuestion(typedQuestion) { typedQuestion = "" }
+                        isSubmittingQuestion = false
+                    }
+                }
+                .disabled(isSubmittingQuestion || typedQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || typedQuestion.count > 4000)
+            }
+            if let error = pythonIntelligenceCoordinator.inputError {
+                Text(error).font(.caption).foregroundStyle(.orange)
+            }
+            if pythonIntelligenceCoordinator.drivingSource == .typedInput && !pythonIntelligenceCoordinator.meetingAudioActive {
+                Text("Microphone input isn't active. Type a question or start meeting audio below.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     // MARK: - Pipeline status
 
     /// The six honest states the build prompt requires — computed in
@@ -75,11 +102,12 @@ struct LiveSessionView: View {
     /// at once, and never shows "Listening"/"No question detected yet"
     /// while a spoken turn is actually still in flight.
     private enum PipelineStep: CaseIterable {
-        case unavailable, refining, drafting, generating, understanding, hearingQuestion, waitingForSilence, transcribing, listening
+        case unavailable, refining, drafting, generating, understanding, hearingQuestion, waitingForSilence, transcribing, listening, readyForText
 
         var label: String {
             switch self {
             case .listening: return "Listening"
+            case .readyForText: return "Ready for a typed question"
             case .transcribing: return "Transcribing"
             case .hearingQuestion: return "Hearing interviewer question…"
             case .waitingForSilence: return "Waiting for interviewer to finish…"
@@ -87,7 +115,7 @@ struct LiveSessionView: View {
             case .drafting: return "Drafting answer…"
             case .refining: return "Refining answer…"
             case .generating: return "Generating answer"
-            case .unavailable: return "Local AI unavailable"
+            case .unavailable: return "AI unavailable"
             }
         }
     }
@@ -114,6 +142,7 @@ struct LiveSessionView: View {
         if conversationState.candidateState == .candidate { return .hearingQuestion }
         if conversationState.turnState == .waitingForSilence { return .waitingForSilence }
         if conversationState.turnState == .speech || conversationState.partialTranscriptText != nil { return .transcribing }
+        if pythonIntelligenceCoordinator.drivingSource == .typedInput && !pythonIntelligenceCoordinator.meetingAudioActive { return .readyForText }
         return .listening
     }
 
@@ -123,7 +152,7 @@ struct LiveSessionView: View {
     /// into a single ambiguous status line.
     private var isAnswerIntelligenceUnavailable: Bool {
         switch pythonIntelligenceCoordinator.drivingSource {
-        case .realTranscription:
+        case .realTranscription, .typedInput:
             return !pythonIntelligenceCoordinator.answerIntelligenceAvailable
         case .pythonWorker, .swiftFallback:
             return true
@@ -149,7 +178,7 @@ struct LiveSessionView: View {
                 }
             }
 
-            if pythonIntelligenceCoordinator.drivingSource == .realTranscription {
+            if pythonIntelligenceCoordinator.drivingSource == .realTranscription || pythonIntelligenceCoordinator.meetingAudioActive {
                 audioModeIndicator
             }
 
@@ -158,7 +187,7 @@ struct LiveSessionView: View {
                     Label(pythonIntelligenceCoordinator.liveSessionIndicatorText, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
-                    Button(isCheckingLocalAI ? "Checking…" : "Check Local AI") {
+                    Button(isCheckingLocalAI ? "Checking…" : "Check AI") {
                         Task {
                             isCheckingLocalAI = true
                             lastLLMStatus = await pythonIntelligenceCoordinator.fetchLLMStatus()
@@ -167,13 +196,13 @@ struct LiveSessionView: View {
                     }
                     .font(.caption)
                     .disabled(isCheckingLocalAI)
-                    Button("Open Local AI Settings") { coordinator.route = .localAIStatus }
+                    Button("Open AI Settings") { coordinator.route = .localAIStatus }
                         .font(.caption)
                         .buttonStyle(.link)
                     Spacer()
                 }
                 if let status = lastLLMStatus, !status.reachable {
-                    Text("Ollama isn't reachable. Answers will not be generated until it's running.")
+                    Text("The selected AI backend isn't reachable. Check AI Backend settings and the SSH tunnel if using the GPU.")
                         .font(.caption2).foregroundStyle(.secondary)
                 } else if let status = lastLLMStatus, !status.modelInstalled {
                     Text("Configured model \"\(status.configuredModel)\" isn't installed. Pull it or pick a different one in Local AI Settings.")
@@ -212,6 +241,10 @@ struct LiveSessionView: View {
                 }
             } else if let answer = conversationState.currentAnswer {
                 answerContent(answer)
+            } else if let question = conversationState.lastFailedQuestionText {
+                Text(question).font(.headline)
+                Text("Question received. Fix the reported backend issue, then choose Retry.")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
                 idleContent
             }
@@ -263,7 +296,7 @@ struct LiveSessionView: View {
     /// this, never automatic.
     private var slowAnswerBanner: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Local model is taking longer than expected…", systemImage: "clock.badge.exclamationmark")
+            Label("AI model is taking longer than expected…", systemImage: "clock.badge.exclamationmark")
                 .font(.callout)
                 .foregroundStyle(.orange)
             HStack {
@@ -364,7 +397,7 @@ struct LiveSessionView: View {
                     Text(candidateText).font(.callout.italic())
                 }
             }
-        case .waitingForSilence, .unavailable, .transcribing, .listening:
+        case .waitingForSilence, .unavailable, .transcribing, .listening, .readyForText:
             // These states never set `isAnswerRoundInFlight`, so
             // `inFlightContent` is never reached for them — see
             // `activeStep`/`isAnswerRoundInFlight`.
@@ -384,6 +417,8 @@ struct LiveSessionView: View {
             Text("Listening for a question…").font(.callout).foregroundStyle(.secondary)
         case .listening:
             Text("No question detected yet.").font(.callout).foregroundStyle(.secondary)
+        case .readyForText:
+            Text("Type a question above, or start meeting audio.").font(.callout).foregroundStyle(.secondary)
         case .refining, .drafting, .generating, .understanding, .hearingQuestion:
             // Unreachable: any of these implies `isAnswerRoundInFlight`,
             // which routes to `inFlightContent` instead.
@@ -444,7 +479,10 @@ struct LiveSessionView: View {
     /// Section 19: the one honest, always-visible statement of what
     /// Veya currently can and can't tell about who's speaking.
     private var audioModeText: String {
-        isSeparatedAudioModeActive
+        if isSeparatedAudioModeActive && pythonIntelligenceCoordinator.drivingSource == .typedInput {
+            return "Meeting audio is the interviewer — microphone input is off"
+        }
+        return isSeparatedAudioModeActive
             ? "Separated interview audio — meeting audio is the interviewer, microphone is you"
             : "Microphone-only — Veya cannot identify speakers automatically"
     }
@@ -470,9 +508,11 @@ struct LiveSessionView: View {
                 Text("I'm answering").font(.caption.bold())
             }
             .toggleStyle(.switch)
-            .disabled(isSeparatedAudioModeActive)
+            .disabled(isSeparatedAudioModeActive || pythonIntelligenceCoordinator.drivingSource != .realTranscription)
             if isSeparatedAudioModeActive {
-                Text("Not needed with separated meeting audio — your microphone is already known to be you.")
+                Text(pythonIntelligenceCoordinator.drivingSource == .typedInput
+                     ? "Microphone input is off. Questions come from the selected meeting audio."
+                     : "Not needed with separated meeting audio — your microphone is already known to be you.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {
@@ -495,7 +535,7 @@ struct LiveSessionView: View {
 
     private var sidePanel: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if pythonIntelligenceCoordinator.drivingSource == .realTranscription {
+            if pythonIntelligenceCoordinator.drivingSource == .realTranscription || pythonIntelligenceCoordinator.drivingSource == .typedInput {
                 MeetingAudioControlView(pythonIntelligenceCoordinator: pythonIntelligenceCoordinator)
                 imAnsweringControl
             }

@@ -19,7 +19,7 @@ struct LocalAIStatusCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("LOCAL AI STATUS").font(.caption.bold()).foregroundStyle(.secondary)
+                Text("AI STATUS").font(.caption.bold()).foregroundStyle(.secondary)
                 Spacer()
                 if viewModel.isLoading { ProgressView().controlSize(.small) }
                 Button {
@@ -32,8 +32,8 @@ struct LocalAIStatusCard: View {
             }
 
             statusRow(
-                label: "Ollama",
-                ready: viewModel.status?.reachable ?? false,
+                label: isGPU ? "Vast GPU" : "Ollama",
+                ready: (viewModel.status?.reachable ?? false) && (viewModel.status?.modelInstalled ?? false),
                 detail: ollamaDetail
             )
             statusRow(
@@ -55,17 +55,31 @@ struct LocalAIStatusCard: View {
                     .textSelection(.enabled)
             }
 
+            if showsModelPicker {
+                Divider()
+                Picker("Answer backend", selection: $viewModel.selectedBackend) {
+                    Text("Local Ollama").tag("ollama")
+                    Text("Vast GPU via SSH").tag("vast")
+                }
+                Button("Use This Backend") {
+                    Task { await viewModel.applySelectedBackend(coordinator: coordinator) }
+                }
+                .disabled(viewModel.isApplying || coordinator.pythonIntelligenceCoordinator.hasActiveSession)
+                Text("GPU mode sends questions and selected context to your rented server through the existing SSH tunnel. Raw audio stays local. End the session before changing backends.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             if showsModelPicker, let status = viewModel.status, !status.availableModels.isEmpty {
                 Divider()
                 Text("INSTALLED MODELS").font(.caption.bold()).foregroundStyle(.secondary)
                 Picker("Model", selection: $viewModel.selectedModel) {
-                    Text("Worker default").tag("")
+                    Text(isGPU ? "Automatic (served GPU model)" : "Worker default").tag("")
                     ForEach(status.availableModels, id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
                 HStack {
                     Button("Use This Model") { Task { await viewModel.applySelectedModel(coordinator: coordinator) } }
-                        .disabled(viewModel.isApplying)
+                        .disabled(viewModel.isApplying || coordinator.pythonIntelligenceCoordinator.hasActiveSession)
                     if viewModel.isApplying { ProgressView().controlSize(.small) }
                 }
             } else if let onOpenSettings {
@@ -91,7 +105,11 @@ struct LocalAIStatusCard: View {
     private var ollamaDetail: String {
         guard let status = viewModel.status else { return "checking…" }
         if !status.reachable { return "not reachable" }
-        return status.modelInstalled ? "\(status.configuredModel) installed" : "\(status.configuredModel) not installed"
+        return status.modelInstalled ? "\(status.configuredModel) ready" : "\(status.configuredModel) unavailable"
+    }
+
+    private var isGPU: Bool {
+        viewModel.status?.provider == "vast" || coordinator.pythonIntelligenceCoordinator.selectedLLMBackend == "vast"
     }
 
     private var isWhisperReady: Bool {
@@ -120,6 +138,11 @@ struct LocalAIStatusCard: View {
 
     private var readinessWarning: String? {
         guard let status = viewModel.status else { return nil }
+        if isGPU {
+            if !status.reachable { return "GPU tunnel unavailable at \(status.baseUrl). Reconnect your existing SSH tunnel forwarding local port 18000. Veya will not switch providers automatically." }
+            if !status.modelInstalled { return "The configured GPU model is not served by the tunneled endpoint." }
+            return nil
+        }
         if !status.reachable {
             return "Ollama isn't reachable at \(status.baseUrl.isEmpty ? "the configured address" : status.baseUrl). Start it with `ollama serve`. Question answering, coding/design assistance, and reports will be unavailable until it's running."
         }
@@ -136,11 +159,13 @@ final class LocalAIStatusViewModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isApplying = false
     @Published var selectedModel = ""
+    @Published var selectedBackend = "ollama"
 
     func refresh(coordinator: AppCoordinator) async {
         isLoading = true
         defer { isLoading = false }
         status = await coordinator.pythonIntelligenceCoordinator.fetchLLMStatus()
+        selectedBackend = coordinator.pythonIntelligenceCoordinator.selectedLLMBackend
         if let status, selectedModel.isEmpty {
             selectedModel = status.modelInstalled ? status.configuredModel : ""
         }
@@ -149,7 +174,18 @@ final class LocalAIStatusViewModel: ObservableObject {
     func applySelectedModel(coordinator: AppCoordinator) async {
         isApplying = true
         defer { isApplying = false }
-        await coordinator.pythonIntelligenceCoordinator.setOllamaModelOverride(selectedModel)
+        if coordinator.pythonIntelligenceCoordinator.selectedLLMBackend == "vast" {
+            await coordinator.pythonIntelligenceCoordinator.setGPUModelOverride(selectedModel)
+        } else {
+            await coordinator.pythonIntelligenceCoordinator.setOllamaModelOverride(selectedModel)
+        }
+        await refresh(coordinator: coordinator)
+    }
+
+    func applySelectedBackend(coordinator: AppCoordinator) async {
+        isApplying = true
+        defer { isApplying = false }
+        await coordinator.pythonIntelligenceCoordinator.setLLMBackend(selectedBackend)
         await refresh(coordinator: coordinator)
     }
 }

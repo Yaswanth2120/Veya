@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds an actual, installable, unsigned Veya.app for local use.
+# Builds an actual, installable, ad-hoc signed Veya.app for local use.
 #
 # This bundles a *venv-based* Python runtime (built with `python3 -m venv
 # --copies` against whatever `python3` is on the build machine's PATH),
@@ -9,15 +9,16 @@
 # which this script deliberately does not attempt (no assumption of
 # reliable network access, and nothing here should silently download and
 # trust an unverified binary). The bundled venv still makes the app
-# launchable without requiring the *end user* to have a compatible python3
-# on PATH — see the honesty note in the final verification report about
-# what "unsigned development app" means here.
+# launchable without requiring python3 on PATH. It still depends on the
+# build machine's underlying Python/framework installation.
 #
 # Usage: packaging/build_app.sh [output_directory]
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUTPUT_DIR="${1:-$REPO_ROOT/.build/package}"
+# Desktop/iCloud/Finder metadata can race code signing. Stage outside the
+# source tree; an explicit output directory remains supported.
+OUTPUT_DIR="${1:-$HOME/Library/Caches/Veya/LocalBuild}"
 APP_PATH="$OUTPUT_DIR/Veya.app"
 CONTENTS="$APP_PATH/Contents"
 
@@ -37,6 +38,8 @@ cp "$REPO_ROOT/packaging/Info.plist" "$CONTENTS/Info.plist"
 
 echo "==> Copying Whisper model manifest (metadata only — no model bytes bundled; downloaded/verified on first use)"
 cp "$REPO_ROOT/packaging/whisper_model_manifest.json" "$CONTENTS/Resources/whisper_model_manifest.json"
+mkdir -p "$CONTENTS/Resources/ThirdPartyNotices"
+cp "$REPO_ROOT/packaging/whisper-stream-stdin/UPSTREAM_LICENSE" "$CONTENTS/Resources/ThirdPartyNotices/whisper.cpp.LICENSE"
 
 if [ -x "$REPO_ROOT/whisper.cpp/build/bin/whisper-cli" ]; then
   echo "==> Bundling whisper-cli binary (degraded-fallback transcription engine)"
@@ -75,7 +78,30 @@ echo "==> Verifying the bundled worker imports cleanly"
 "$BUNDLED_PYTHON/bin/python3" -c "import sys; sys.path.insert(0, '$CONTENTS/Resources/veya-worker'); import veya" \
   || { echo "FATAL: bundled veya package failed to import" >&2; exit 1; }
 
+echo "==> Signing local helpers and app bundle (bind Info.plist and resources to com.veya.app)"
+python3 - "$APP_PATH" <<'PY'
+import pathlib
+import subprocess
+import sys
+root = pathlib.Path(sys.argv[1])
+listing = subprocess.run(["/usr/bin/xattr", "-r", "-s", str(root)], check=True, capture_output=True, text=True).stdout
+for line in listing.splitlines():
+    path, separator, attribute = line.rpartition(": ")
+    if separator and attribute in {"com.apple.FinderInfo", "com.apple.ResourceFork"}:
+        pathlib.Path(path).relative_to(root)
+        subprocess.run(["/usr/bin/xattr", "-s", "-d", attribute, path], check=True)
+PY
+SIGNING_IDENTITY="${VEYA_CODESIGN_IDENTITY:--}"
+for HELPER in "$CONTENTS/Resources/whisper-bin/whisper-cli" "$CONTENTS/Resources/whisper-bin/whisper-stream-stdin"; do
+  if [ -f "$HELPER" ]; then
+    codesign --force --sign "$SIGNING_IDENTITY" "$HELPER"
+  fi
+done
+codesign --force --sign "$SIGNING_IDENTITY" "$BUNDLED_PYTHON/bin/python3"
+/usr/bin/xattr -s -d com.apple.FinderInfo "$APP_PATH" 2>/dev/null || true
+codesign --force --sign "$SIGNING_IDENTITY" --identifier com.veya.app "$APP_PATH"
+codesign --verify --deep --strict "$APP_PATH"
+
 echo "==> Done: $APP_PATH"
 echo "    Launch with: open \"$APP_PATH\""
-echo "    (unsigned — Gatekeeper will require right-click > Open, or:"
-echo "     xattr -dr com.apple.quarantine \"$APP_PATH\")"
+echo "    (local development signature; not notarized for public distribution)"

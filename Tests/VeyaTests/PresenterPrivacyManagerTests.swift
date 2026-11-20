@@ -190,16 +190,9 @@ struct PresenterPrivacyManagerTests {
         #expect(window.sharingType == .readOnly)
     }
 
-    /// Verified empirically (see `applyWindowSharingPolicy`'s doc comment):
-    /// once `NSWindow.sharingType` is set to `.none`, AppKit does not honor
-    /// setting it back to `.readOnly` on that same window instance — this
-    /// is a real platform constraint, not a bug in `PresenterPrivacyManager`.
-    /// Veya's mitigation is that a fresh `NSWindow` is created per Live
-    /// Session, so the very next session's overlay starts at the correct
-    /// default regardless.
-    @Test("a window already marked direct-private stays excluded even after switching mode away")
-    func windowMarkedNoneStaysExcludedAfterModeSwitch() async {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.borderless], backing: .buffered, defer: false)
+    @Test("leaving direct-private mode requests normal sharing and invalidates verification")
+    func leavingDirectModeRequestsNormalSharing() async {
+        let window = RecordingSharingWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100), styleMask: [.borderless], backing: .buffered, defer: false)
         let manager = makeManager()
         manager.setOverlayWindowProvider { window }
 
@@ -209,9 +202,19 @@ struct PresenterPrivacyManagerTests {
 
         await manager.selectMode(.safeShare)
 
-        // PresenterPrivacyManager did attempt to restore .readOnly — this
-        // assertion documents that AppKit doesn't let that attempt succeed
-        // on this window instance, not that Veya failed to try.
-        #expect(window.sharingType == .none)
+        #expect(window.requestedSharingTypes.suffix(2) == [.none, .readOnly])
+        #expect(manager.status == .notTested)
+    }
+}
+
+@MainActor
+private final class RecordingSharingWindow: NSWindow {
+    private(set) var requestedSharingTypes: [NSWindow.SharingType] = []
+    override var sharingType: NSWindow.SharingType {
+        get { super.sharingType }
+        set {
+            requestedSharingTypes.append(newValue)
+            super.sharingType = newValue
+        }
     }
 }

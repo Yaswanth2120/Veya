@@ -160,6 +160,14 @@ final class PythonWorkerManager: ObservableObject {
         if environment["VEYA_OLLAMA_MODEL"] == nil, let ollamaModelOverride = configuration.ollamaModelOverride, !ollamaModelOverride.isEmpty {
             environment["VEYA_OLLAMA_MODEL"] = ollamaModelOverride
         }
+        if let backend = configuration.llmBackendOverride {
+            environment["VEYA_LLM_BACKEND"] = backend
+        }
+        if let model = configuration.gpuModelOverride {
+            environment["VEYA_GPU_MODEL"] = model.isEmpty ? nil : model
+        }
+        // Never mutate the sealed app bundle with runtime __pycache__ files.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         process.environment = environment
 
         let stdinPipe = Pipe()

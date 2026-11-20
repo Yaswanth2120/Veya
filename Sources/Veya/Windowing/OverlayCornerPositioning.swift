@@ -14,6 +14,18 @@ enum OverlayCornerPositioning {
     /// screen-center default," not a position the user chose themselves.
     static let centeredDetectionTolerance: CGFloat = 40
 
+    static func repairedFrame(_ frame: CGRect, preferredSize: CGSize, in visibleFrame: CGRect) -> CGRect {
+        let widthLimit = min(CGFloat(640), visibleFrame.width - 2 * defaultMargin)
+        let heightLimit = min(CGFloat(520), visibleFrame.height - 2 * defaultMargin)
+        if frame.width < 300 || frame.height < 150 || frame.width > widthLimit || frame.height > heightLimit {
+            let size = CGSize(width: min(preferredSize.width, widthLimit), height: min(preferredSize.height, heightLimit))
+            return CGRect(origin: cornerOrigin(forPanelSize: size, in: visibleFrame), size: size)
+        }
+        return CGRect(x: min(max(frame.minX, visibleFrame.minX), visibleFrame.maxX - frame.width),
+                      y: min(max(frame.minY, visibleFrame.minY), visibleFrame.maxY - frame.height),
+                      width: frame.width, height: frame.height)
+    }
+
     /// The bottom-right-corner origin for a panel of `size` within
     /// `visibleFrame`, `margin` points in from each edge.
     static func cornerOrigin(forPanelSize size: CGSize, in visibleFrame: CGRect, margin: CGFloat = defaultMargin) -> CGPoint {

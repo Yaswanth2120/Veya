@@ -19,3 +19,9 @@ KnowledgeIndex/
 SessionDocuments/
 .claude/
 .vscode/
+
+# Local credentials and generated app bundles
+.env
+.env.*
+!.env.example
+*.app/

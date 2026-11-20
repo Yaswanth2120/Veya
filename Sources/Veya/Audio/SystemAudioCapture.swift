@@ -82,9 +82,6 @@ final class SystemAudioCapture: AudioCapturing, @unchecked Sendable {
     /// app" preflight picker, per the product requirement to prefer a
     /// specific application over indiscriminate all-system audio.
     static func selectableApplications() async throws -> [SelectableAudioApplication] {
-        guard CGPreflightScreenCaptureAccess() else {
-            throw AudioCaptureError.microphonePermissionDenied
-        }
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.current
@@ -107,10 +104,6 @@ final class SystemAudioCapture: AudioCapturing, @unchecked Sendable {
     }
 
     func start() async throws {
-        guard CGPreflightScreenCaptureAccess() else {
-            throw AudioCaptureError.microphonePermissionDenied
-        }
-
         _ = chunks()
 
         let shareableContent: SCShareableContent

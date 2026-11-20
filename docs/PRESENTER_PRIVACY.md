@@ -261,19 +261,12 @@ construction, not by remembering to add it to an exclusion list.
 - `SCScreenshotManager.captureImage` is a single-shot API; the
   compatibility test's 5 sequential captures take roughly half a second
   in total (5 × ~120ms), not instantaneous.
-- **`NSWindow.sharingType = .none` is sticky.** Verified empirically: once
-  a window's `sharingType` has been set to `.none`, AppKit does not honor
-  setting it back to `.readOnly` on that *same* window instance — the
-  window server treats the exclusion as one-way. Practically, this means
-  switching Presenter Privacy mode away from Direct Private Overlay
-  mid-session does not "un-hide" the current overlay window from sharing;
-  it stays excluded until a new overlay window is created (Veya creates a
-  fresh one per Live Session, so the next session is unaffected). This
-  fails safe — a window the user marked private doesn't silently become
-  shareable again — but it does mean `PresenterPrivacyManager
-  .applyWindowSharingPolicy()`'s restore-to-`.readOnly` call is a genuine
-  best-effort attempt, not a guarantee, for windows that already had
-  `.none` applied.
+- **Window sharing flags are OS-dependent.** Veya requests `.none` for
+  Direct Private Overlay and `.readOnly` when leaving it. Older observed
+  systems retained `.none`; the current development system honors the
+  restore. Neither a setter call nor property read-back establishes what
+  a meeting platform will capture. Mode changes invalidate prior test
+  results; rerun the compatibility test for the current configuration.
 
 ## 16. Troubleshooting
 

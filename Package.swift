@@ -1,5 +1,9 @@
 // swift-tools-version: 6.0
 import PackageDescription
+import Foundation
+
+let cltTestingFrameworks = "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
+let needsCLTTestingWorkaround = FileManager.default.fileExists(atPath: cltTestingFrameworks + "/Testing.framework")
 
 let package = Package(
     name: "Veya",
@@ -24,7 +28,7 @@ let package = Package(
             name: "VeyaTests",
             dependencies: ["Veya"],
             path: "Tests/VeyaTests",
-            swiftSettings: [
+            swiftSettings: needsCLTTestingWorkaround ? [
                 // Xcode.app isn't installed on this machine (CLT only), so
                 // swift-testing's framework lives under the CLT toolchain
                 // rather than a system search path `swift test` finds by
@@ -40,13 +44,13 @@ let package = Package(
                     // need its extra Foundation-specific matchers.
                     "-Xfrontend", "-disable-cross-import-overlays"
                 ])
-            ],
-            linkerSettings: [
+            ] : [],
+            linkerSettings: needsCLTTestingWorkaround ? [
                 .unsafeFlags([
                     "-Xlinker", "-F", "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
                     "-Xlinker", "-rpath", "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
                 ])
-            ]
+            ] : []
         )
     ]
 )

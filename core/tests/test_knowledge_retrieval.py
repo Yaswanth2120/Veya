@@ -104,6 +104,16 @@ class KnowledgeRetrieverTests(unittest.IsolatedAsyncioTestCase):
         retriever = KnowledgeRetriever(self.store, self.provider)
         self.assertEqual(retriever.build_context_block([]), "")
 
+    async def test_generation_receives_evidence_beyond_short_display_excerpt(self):
+        from veya.knowledge.models import RetrievedChunk
+        from veya.knowledge.chunking import chunk_text
+        text = "Background details. " * 20 + "Reduced inference cost by 35%."
+        chunk = chunk_text(text, "doc", "sess1", "resume.txt")[0]
+        self.assertNotIn("35%", chunk.excerpt)
+        retriever = KnowledgeRetriever(self.store, self.provider)
+        block = retriever.build_context_block([RetrievedChunk(chunk, 1.0)])
+        self.assertIn("35%", block)
+
     async def test_build_context_block_includes_file_name_and_excerpt(self):
         chunks = await self._seed(texts=["the migration took six weeks because of staged rollout"])
         retriever = KnowledgeRetriever(self.store, self.provider, RetrievalConfig(similarity_threshold=0.0))

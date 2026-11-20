@@ -2,6 +2,7 @@ import Foundation
 
 enum AudioCaptureError: LocalizedError, Sendable, Equatable {
     case microphonePermissionDenied
+    case screenRecordingPermissionDenied
     case engineStartFailed(String)
     case unsupportedFormat(String)
     case captureStoppedUnexpectedly(String)
@@ -10,6 +11,8 @@ enum AudioCaptureError: LocalizedError, Sendable, Equatable {
         switch self {
         case .microphonePermissionDenied:
             return "Microphone access was not granted."
+        case .screenRecordingPermissionDenied:
+            return "Screen & System Audio Recording access was not granted."
         case .engineStartFailed(let reason):
             return "Could not start audio capture: \(reason)"
         case .unsupportedFormat(let reason):

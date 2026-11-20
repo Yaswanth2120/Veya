@@ -9,6 +9,10 @@ import Foundation
 /// the shell environment, if a developer set one).
 struct LocalAIPreferences: Codable, Equatable, Sendable {
     var ollamaModel: String = ""
+    /// nil preserves an existing environment selection; otherwise an
+    /// explicit user choice of "ollama" or "vast".
+    var llmBackend: String?
+    var gpuModel: String?
 
     static let `default` = LocalAIPreferences()
 }

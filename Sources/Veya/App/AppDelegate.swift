@@ -28,4 +28,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard appCoordinator.currentSession != nil else { return .terminateNow }
+        appCoordinator.endLiveSession()
+        Task {
+            let deadline = Date().addingTimeInterval(15)
+            while appCoordinator.isEndingSession && Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        appCoordinator.overlayWindowController?.hide()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        if appCoordinator.route == .liveSession { appCoordinator.overlayWindowController?.show() }
+    }
 }

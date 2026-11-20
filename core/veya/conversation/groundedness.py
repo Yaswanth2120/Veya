@@ -51,7 +51,7 @@ def _has_self_contradictory_numeric_change(text: str) -> bool:
 
 
 def _percentages_in(text: str) -> set:
-    return {match.group(0).replace(" ", "") for match in _PERCENT_RE.finditer(text)}
+    return {re.sub(r"\s+", "", match.group(0)) for match in _PERCENT_RE.finditer(text)}
 
 
 def check_answer_groundedness(answer_text: str, grounding_text: str) -> GroundednessResult:

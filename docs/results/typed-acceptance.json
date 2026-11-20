@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-11-20T23:06:47.769292+00:00",
+  "fixture": "synthetic-atlas-cost-reduction-v1",
+  "synthetic_data_only": true,
+  "model": "openai/gpt-oss-120b",
+  "context_window": 8192,
+  "input_mode": "typed",
+  "long_context": true,
+  "worker": "packaged",
+  "asr_provider": null,
+  "client": {
+    "os": "Darwin",
+    "os_version": "26.7.4",
+    "architecture": "arm64",
+    "python": "3.14.6"
+  },
+  "measurements_seconds": {
+    "first_usable_text": 2.048,
+    "answer_completed": 2.912
+  },
+  "checks": {
+    "local_document_indexed": true,
+    "retrieved_source": true,
+    "expected_metric_and_techniques": true,
+    "streamed_text": true,
+    "completed_without_failure": true
+  },
+  "interpretation": "Single synthetic acceptance sample; not an accuracy evaluation, percentile benchmark, or live meeting capture test."
+}

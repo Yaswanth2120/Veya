@@ -1,8 +1,8 @@
 {
-  "id": "for-tests-ggml-base.en",
-  "url": "file:///Users/yaswanth/Desktop/Veya/whisper.cpp/models/for-tests-ggml-base.en.bin",
-  "sha256": "1bc042ca584ff1895897e95bffb34ccf357be46c1fca97cf7fbe32f2060aa9e8",
-  "architecture": "universal",
-  "sizeBytes": 586836,
-  "version": "test-fixture-1"
+  "id": "ggml-base.en",
+  "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+  "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+  "architecture": "arm64",
+  "sizeBytes": 147964211,
+  "version": "1"
 }

@@ -45,16 +45,21 @@ struct CreateSessionView: View {
             LocalAIStatusCard(onOpenSettings: { coordinator.route = .localAIStatus })
 
             ScrollView {
-                Form {
-                    Section("Interview") {
-                        TextField("Interview title", text: $viewModel.title)
-                        TextField("Company (optional)", text: $viewModel.company)
-                        TextField("Role / job title (optional)", text: $viewModel.roleOrTopic)
-                        TextField("Job description / interview notes (optional)", text: $viewModel.sessionDescription, axis: .vertical)
-                            .lineLimit(2...5)
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Interview").font(.headline)
+                        EditableSessionField(label: "Interview title", text: $viewModel.title, identifier: "session.title", focusesOnMount: true)
+                            .frame(height: 30)
+                        EditableSessionField(label: "Company (optional)", text: $viewModel.company, identifier: "session.company")
+                            .frame(height: 30)
+                        EditableSessionField(label: "Role / job title (optional)", text: $viewModel.roleOrTopic, identifier: "session.role")
+                            .frame(height: 30)
+                        EditableSessionField(label: "Job description / interview notes (optional)", text: $viewModel.sessionDescription, identifier: "session.notes", multiline: true)
+                            .frame(height: 80)
                     }
 
-                    Section("Personal context") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Personal context").font(.headline)
                         HStack {
                             Text("Approved memory and background come from your")
                             Button("Personal Profile") { coordinator.route = .personalProfile }
@@ -63,7 +68,8 @@ struct CreateSessionView: View {
                         .font(.caption)
                     }
 
-                    Section("Documents") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Documents").font(.headline)
                         Button("Attach files…") {
                             viewModel.isFileImporterPresented = true
                         }
@@ -89,6 +95,8 @@ struct CreateSessionView: View {
                                     Text(ByteCountFormatter.string(fromByteCount: document.fileSizeBytes, countStyle: .file))
                                         .foregroundStyle(.secondary)
                                         .font(.caption)
+                                    Button("Remove") { viewModel.attachedDocuments.removeAll { $0.fileName == document.fileName } }
+                                        .font(.caption)
                                 }
                             }
                         }
@@ -99,29 +107,27 @@ struct CreateSessionView: View {
                             .font(.caption)
                     }
                 }
-                .formStyle(.grouped)
+                .padding(2)
             }
 
             HStack {
-                if let error = viewModel.errorMessage {
-                    Text(error)
-                        .foregroundStyle(.red)
+                if let message = viewModel.errorMessage ?? viewModel.validationMessage {
+                    Text(message)
+                        .foregroundStyle(viewModel.errorMessage == nil ? Color.secondary : Color.red)
                         .font(.caption)
                 }
                 Spacer()
-                Button("Create Session") {
+                Button(viewModel.isSaving ? "Creating…" : "Create Session") {
                     Task { await createAndProceed() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canCreate)
+                .disabled(!canCreate || coordinator.isEndingSession)
             }
         }
     }
 
     private var canCreate: Bool {
-        guard !viewModel.title.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
-        if !viewModel.hasResumeDocument, !viewModel.startWithoutResume { return false }
-        return true
+        viewModel.validationMessage == nil && !viewModel.isSaving
     }
 
     private func createAndProceed() async {

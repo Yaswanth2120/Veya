@@ -7,6 +7,7 @@ import Foundation
 enum ConversationDrivingSource: Equatable, Sendable {
     case none
     case realTranscription
+    case typedInput
     case pythonWorker
     case swiftFallback
 }
@@ -43,6 +44,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// flow either way (see the type doc comment's fallback order);
     /// this only affects whether questions get answered.
     @Published private(set) var answerIntelligenceAvailable = false
+    @Published private(set) var inputError: String?
     /// The mixed/microphone-only mode "I'm answering" hold-to-talk/toggle
     /// state (Section 16) — `true` while the user's own mixed-track
     /// speech should be treated as authoritative answer context instead
@@ -85,6 +87,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     // method below is then a harmless, honest no-op.
     private let meetingAudioCapture: AudioCapturing?
     @Published private(set) var meetingAudioActive = false
+    @Published private(set) var meetingAudioError: String?
     private var meetingAudioChunkSender: AudioChunkSender?
     private var meetingAudioForwardingTask: Task<Void, Never>?
 
@@ -122,7 +125,10 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// worker launch already has real transcription configured whenever
     /// possible, not only after a later restart.
     func launchWorkerInBackground() {
-        let storedModel = localAIPreferencesStore.load().ollamaModel
+        let preferences = localAIPreferencesStore.load()
+        let storedModel = preferences.ollamaModel
+        workerManager.configuration.llmBackendOverride = preferences.llmBackend
+        workerManager.configuration.gpuModelOverride = preferences.gpuModel
         if !storedModel.isEmpty {
             workerManager.configuration.ollamaModelOverride = storedModel
         }
@@ -153,8 +159,38 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// rather than only on the next app launch. An empty string clears
     /// the override, reverting to the worker's own default.
     func setOllamaModelOverride(_ model: String) async {
-        localAIPreferencesStore.save(LocalAIPreferences(ollamaModel: model))
+        guard activeSessionID == nil else { return }
+        var preferences = localAIPreferencesStore.load()
+        preferences.ollamaModel = model
+        localAIPreferencesStore.save(preferences)
         workerManager.configuration.ollamaModelOverride = model.isEmpty ? nil : model
+        await workerManager.stop()
+        await workerManager.start()
+    }
+
+    var hasActiveSession: Bool { activeSessionID != nil }
+
+    func setGPUModelOverride(_ model: String) async {
+        guard activeSessionID == nil else { return }
+        var preferences = localAIPreferencesStore.load()
+        preferences.gpuModel = model
+        localAIPreferencesStore.save(preferences)
+        workerManager.configuration.gpuModelOverride = model
+        await workerManager.stop()
+        await workerManager.start()
+    }
+
+    var selectedLLMBackend: String {
+        workerManager.configuration.llmBackendOverride
+            ?? ProcessInfo.processInfo.environment["VEYA_LLM_BACKEND"] ?? "ollama"
+    }
+
+    func setLLMBackend(_ backend: String) async {
+        guard activeSessionID == nil, ["ollama", "vast"].contains(backend) else { return }
+        var preferences = localAIPreferencesStore.load()
+        preferences.llmBackend = backend
+        localAIPreferencesStore.save(preferences)
+        workerManager.configuration.llmBackendOverride = backend
         await workerManager.stop()
         await workerManager.start()
     }
@@ -300,6 +336,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// Call when a Live Session starts. See the type doc comment for the
     /// three-way selection order.
     func beginLiveSession(state: ConversationState, session: Session) async {
+        inputError = nil
         guard workerManager.state == .ready else {
             beginSwiftFallback(state: state)
             return
@@ -351,6 +388,24 @@ final class PythonIntelligenceCoordinator: ObservableObject {
         }
 
         if await tryBeginRealTranscription(state: state, session: session) {
+            return
+        }
+
+        if selectedLLMBackend == "vast" {
+            state.beginPythonDrivenSession()
+            drivingSource = .typedInput
+            workerManager.beginHealthChecking()
+            do {
+                let _: OkResult = try await workerManager.call(
+                    method: "conversation.start_text",
+                    params: SessionIdentifierParams(sessionId: session.id.uuidString), timeout: 10)
+                guard activeSessionID == session.id else { return }
+                answerIntelligenceAvailable = true
+                inputError = nil
+            } catch {
+                guard activeSessionID == session.id else { return }
+                inputError = "GPU unavailable. Check your SSH tunnel, then submit a question to retry."
+            }
             return
         }
 
@@ -529,17 +584,18 @@ final class PythonIntelligenceCoordinator: ObservableObject {
             activeConversationState = nil
             drivingSource = .none
             answerIntelligenceAvailable = false
+            inputError = nil
             isUserSpeaking = false
         }
 
         guard activeSessionID == sessionID else { return }
         let source = drivingSource
-        guard source == .pythonWorker || source == .realTranscription else { return }
+        guard source == .pythonWorker || source == .realTranscription || source == .typedInput else { return }
 
         workerManager.endHealthChecking()
         let sessionIdString = sessionID.uuidString
 
-        if source == .realTranscription {
+        if source == .realTranscription || source == .typedInput {
             tearDownRealTranscriptionResources()
             // Best-effort — cancels any answer still generating for this
             // session before tearing it down, so Python's generation
@@ -577,6 +633,23 @@ final class PythonIntelligenceCoordinator: ObservableObject {
         tearDownMeetingAudioResources()
     }
 
+    func submitQuestion(_ text: String) async -> Bool {
+        guard let sessionID = activeSessionID, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        struct QuestionParams: Encodable, Sendable { let sessionId: String; let text: String }
+        do {
+            let _: OkResult = try await workerManager.call(method: "answer.ask",
+                params: QuestionParams(sessionId: sessionID.uuidString, text: text), timeout: 10)
+            guard activeSessionID == sessionID else { return false }
+            if drivingSource == .pythonWorker { drivingSource = .typedInput }
+            answerIntelligenceAvailable = true
+            inputError = nil
+            return true
+        } catch {
+            inputError = "Could not submit the question. Check AI Backend settings and the SSH tunnel; questions are limited to 4000 characters."
+            return false
+        }
+    }
+
     private func tearDownMeetingAudioResources() {
         meetingAudioForwardingTask?.cancel()
         meetingAudioForwardingTask = nil
@@ -598,7 +671,8 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// actionable "Meeting audio unavailable" status instead of a crash.
     @discardableResult
     func beginMeetingAudioCapture(source: SystemAudioSource? = nil) async -> Bool {
-        guard let meetingAudioCapture, drivingSource == .realTranscription, let sessionID = activeSessionID else {
+        meetingAudioError = nil
+        guard let meetingAudioCapture, drivingSource == .realTranscription || drivingSource == .typedInput, let sessionID = activeSessionID else {
             return false
         }
         guard !meetingAudioActive else { return true }
@@ -616,6 +690,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
             )
         } catch {
             BridgeLog.error("transcription.start_meeting_audio failed, errorType=\(String(reflecting: type(of: error)))")
+            meetingAudioError = "The meeting transcription worker could not start. End and restart the session."
             return false
         }
         guard result?.ok == true else { return false }
@@ -628,6 +703,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
                 params: SessionIdentifierParams(sessionId: sessionIdString)
             )
             BridgeLog.error("meeting-audio capture failed to start, errorType=\(String(reflecting: type(of: error)))")
+            meetingAudioError = (error as? AudioCaptureError)?.errorDescription ?? "Could not capture meeting audio. Check Screen & System Audio Recording permission and select the application again."
             return false
         }
 
@@ -640,6 +716,10 @@ final class PythonIntelligenceCoordinator: ObservableObject {
         meetingAudioForwardingTask = Task {
             for await chunk in stream {
                 await sender.send(chunk)
+            }
+            if self.meetingAudioActive, self.activeSessionID == sessionID {
+                self.meetingAudioActive = false
+                self.meetingAudioError = "Meeting audio stopped. Select the meeting application again and restart capture."
             }
         }
         meetingAudioActive = true
@@ -686,7 +766,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// control — never triggered automatically. Cancels whatever is
     /// actively generating and advances the interviewer-turn queue.
     func skipActiveAnswer() async {
-        guard let sessionID = activeSessionID, drivingSource == .realTranscription else { return }
+        guard let sessionID = activeSessionID, drivingSource == .realTranscription || drivingSource == .typedInput else { return }
         let _: OkResult? = try? await workerManager.call(
             method: "answer.skip",
             params: SessionIdentifierParams(sessionId: sessionID.uuidString)
@@ -697,7 +777,7 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// generation was for, identified from that failure's own
     /// `answer.completed` event (see `ConversationState.lastFailedQuestionID`).
     func retryFailedAnswer(questionID: String, questionText: String) async {
-        guard let sessionID = activeSessionID, drivingSource == .realTranscription else { return }
+        guard let sessionID = activeSessionID, drivingSource == .realTranscription || drivingSource == .typedInput else { return }
         let _: OkResult? = try? await workerManager.call(
             method: "answer.retry",
             params: AnswerRetryParams(sessionId: sessionID.uuidString, questionId: questionID, questionText: questionText)
@@ -709,6 +789,9 @@ final class PythonIntelligenceCoordinator: ObservableObject {
     /// prompt's exact wording.
     var liveSessionIndicatorText: String {
         switch drivingSource {
+        case .typedInput:
+            if meetingAudioActive { return "Listening — meeting audio" }
+            return answerIntelligenceAvailable ? "Typed questions — AI ready" : "AI unavailable — check backend settings"
         case .realTranscription:
             if let state = activeConversationState {
                 if state.isGeneratingAnswer { return "Generating answer…" }

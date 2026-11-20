@@ -92,6 +92,9 @@ struct OverlayView: View {
                 .font(.caption.bold())
                 .foregroundStyle(.secondary)
             Spacer()
+            Button { controller.hide() } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain)
+                .help("Hide overlay")
             Button {
                 controller.toggleCompactMode()
             } label: {
@@ -210,7 +213,7 @@ struct OverlayView: View {
     }
 
     private var emptyState: some View {
-        Text("Listening for questions…")
+        Text(conversationState.lastFailedQuestionText ?? "Listening for questions…")
             .font(.callout)
             .foregroundStyle(.secondary)
     }

@@ -370,6 +370,7 @@ struct SystemInfoResult: Decodable, Sendable {
 /// panel (Settings), never a gate on whether a real RPC is attempted.
 /// `error` is a short, typed reason string, never a raw exception message.
 struct LLMStatusResult: Decodable, Sendable {
+    var provider: String? = nil
     let reachable: Bool
     let baseUrl: String
     let configuredModel: String

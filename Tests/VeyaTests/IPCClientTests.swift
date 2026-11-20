@@ -4,15 +4,17 @@ import Testing
 
 @Suite("IPCClient")
 struct IPCClientTests {
+    // Correlation tests assert protocol behavior, not scheduler speed.
+    // Allow loaded macOS/CI runners to deliver the synthetic responses.
     @Test("a successful response resolves the matching pending request")
     func successfulResponseResolves() async throws {
         let transport = FakeIPCTransport()
         let client = IPCClient(transport: transport)
         await client.start()
 
-        async let result: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 2)
+        async let result: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 10)
 
-        try await waitUntil { transport.sentLines.count == 1 }
+        try await waitUntil(timeout: 5) { transport.sentLines.count == 1 }
         let id = try #require(transport.lastSentRequestID())
         transport.simulateIncoming(#"{"version":1,"id":"\#(id)","type":"response","result":{"pong":true}}"#)
 
@@ -26,12 +28,12 @@ struct IPCClientTests {
         let client = IPCClient(transport: transport)
         await client.start()
 
-        async let first: SystemInfoResult = client.call(method: "system.info", params: EmptyIPCParams(), timeout: 2)
-        try await waitUntil { transport.sentLines.count == 1 }
+        async let first: SystemInfoResult = client.call(method: "system.info", params: EmptyIPCParams(), timeout: 10)
+        try await waitUntil(timeout: 5) { transport.sentLines.count == 1 }
         let firstID = try #require(transport.lastSentRequestID())
 
-        async let second: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 2)
-        try await waitUntil { transport.sentLines.count == 2 }
+        async let second: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 10)
+        try await waitUntil(timeout: 5) { transport.sentLines.count == 2 }
         let secondID = try #require(transport.lastSentRequestID())
 
         #expect(firstID != secondID)
@@ -66,8 +68,8 @@ struct IPCClientTests {
         let client = IPCClient(transport: transport)
         await client.start()
 
-        async let result: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 2)
-        try await waitUntil { transport.sentLines.count == 1 }
+        async let result: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 10)
+        try await waitUntil(timeout: 5) { transport.sentLines.count == 1 }
         let id = try #require(transport.lastSentRequestID())
         transport.simulateIncoming(
             #"{"version":1,"id":"\#(id)","type":"error","error":{"code":"INVALID_REQUEST","message":"bad"}}"#
@@ -100,8 +102,8 @@ struct IPCClientTests {
         let client = IPCClient(transport: transport)
         await client.start()
 
-        async let result: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 2)
-        try await waitUntil { transport.sentLines.count == 1 }
+        async let result: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 10)
+        try await waitUntil(timeout: 5) { transport.sentLines.count == 1 }
         let id = try #require(transport.lastSentRequestID())
 
         transport.simulateIncoming("not json at all")
@@ -133,7 +135,7 @@ struct IPCClientTests {
         await client.start()
 
         async let result: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 5)
-        try await waitUntil { transport.sentLines.count == 1 }
+        try await waitUntil(timeout: 5) { transport.sentLines.count == 1 }
 
         await client.stop()
 
@@ -152,7 +154,7 @@ struct IPCClientTests {
         await client.start()
 
         async let result: PingResult = client.call(method: "system.ping", params: EmptyIPCParams(), timeout: 5)
-        try await waitUntil { transport.sentLines.count == 1 }
+        try await waitUntil(timeout: 5) { transport.sentLines.count == 1 }
 
         transport.simulateClose()
 

@@ -52,6 +52,8 @@ struct PythonWorkerConfiguration: Sendable {
     /// which always wins over this (see
     /// `PythonWorkerManager.launchProcessAndWaitForReady`).
     var ollamaModelOverride: String?
+    var llmBackendOverride: String?
+    var gpuModelOverride: String?
 
     var rpcTimeout: TimeInterval = 5
     var readyTimeout: TimeInterval = 10

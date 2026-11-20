@@ -48,6 +48,7 @@ class RetrievalConfig:
     similarity_threshold: float = 0.3
     max_context_characters: int = 4000
     max_excerpt_length: int = 240
+    max_chunk_context_characters: int = 800
 
 
 @dataclass(frozen=True)

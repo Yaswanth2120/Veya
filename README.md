@@ -1,147 +1,175 @@
 # Veya
 
-Veya is a native macOS **Interview Copilot**. It listens locally, transcribes microphone or opted-in meeting audio, detects interviewer questions, retrieves relevant resume/job-description/personal context, and streams a natural first-person answer for the candidate to say aloud.
+[![Tests](https://github.com/Yaswanth2120/Veya/actions/workflows/ci.yml/badge.svg)](https://github.com/Yaswanth2120/Veya/actions/workflows/ci.yml)
 
-The app uses local Whisper transcription and a local Ollama model for retrieval and answer generation. Ollama is loopback-only by default. The packaged app may download a selected Whisper model from Hugging Face on first launch, verifies its SHA-256, then caches it locally for offline use.
+A native macOS interview-practice assistant that turns spoken or typed questions into streamed, document-informed answers. Built with **SwiftUI/AppKit, Python, whisper.cpp, Ollama embeddings, SQLite/GRDB, and vLLM-compatible Responses inference**.
 
-Swift/SwiftUI (AppKit-hosted) owns the UI, all session/transcript/question/answer persistence (GRDB/SQLite), and process lifecycle. A local Python worker (`core/veya`) is spawned as a subprocess and communicates over a versioned JSON Lines protocol on stdin/stdout; it owns only *derived* data — transcription, LLM calls, the knowledge/embedding index, coding/design workspace state, and durable approved memory — never the source-of-truth session data.
+Veya supports local Ollama generation or an explicitly selected rented GPU through an SSH tunnel. Raw audio, document embeddings, and session storage remain on the Mac. GPU mode sends questions and selected document, memory, and conversation text to the remote server.
 
-## Current product scope
+**Status:** working local development prototype. Core pipelines, native form editing, and GPU-backed answer display have been exercised. Live Zoom/Google Meet capture, broad answer-quality evaluation, and a portable notarized release remain future validation work. See [validation evidence](docs/VALIDATION.md).
 
-The active Create Session experience is intentionally **interview-only**. New sessions are created as `Interview Practice`; historic non-interview sessions remain readable for compatibility but are not presented as choices for new sessions.
+## What it does
 
-1. Upload and label a **Resume** (required by default), **Job Description** (optional), and supporting documents.
-2. Veya indexes them locally and waits at **Preparing Interview Context**. Normal start is enabled only after required documents are ready; failure requires an explicit override.
-3. During the interview, Veya streams a speakable answer based on the question, indexed documents, approved memory, previous conversation, and the candidate's own previously spoken answer.
-4. In microphone-only mode, use **I'm answering** / `⌘⇧A` while the candidate speaks. This stores that speech as authoritative personal context and prevents it from becoming a new interviewer question.
-5. For separated tracks, opt in to **Meeting Audio** during a live session, grant Screen Recording permission, and select the meeting application. This is intended for Zoom, Meet, or Teams, but real-platform capture is still a manual verification requirement.
+- Captures microphone audio locally; supports opted-in meeting/system audio through ScreenCaptureKit. Meeting audio can run without a microphone track.
+- Transcribes incrementally with whisper.cpp; Apple Silicon defaults to **Whisper base.en**, an English-only model.
+- Assembles spoken turns, filters non-speech artifacts, detects question candidates, and queues up to three later questions while preserving the current answer.
+- Indexes resume, job-description, and supporting `.txt`, `.md`, `.pdf`, and `.docx` documents with local `nomic-embed-text` embeddings and session-scoped SQLite vector retrieval.
+- Streams clean answer text without reasoning blocks; attaches references to the actual retrieved chunks. A narrow percentage guard catches some unsupported numeric claims, but is not a general fact-checker.
+- Accepts typed questions through the same retrieval and answer pipeline, retaining bounded preceding question context.
+- Saves session history and reports; durable personal memory requires explicit user approval.
+- Provides backend health/model discovery, explicit tunnel/context errors, and a selectable served GPU model. It does not silently switch inference hosts.
 
-Non-speech transcript content (`[BLANK_AUDIO]`, `(soft music)`, `(wind blowing)`, etc.) is rejected before it ever reaches the transcript, question detection, or an answer prompt — via a shared eligibility layer (`core/veya/conversation/transcript_eligibility.py`) used by both real transcription paths. A compound interviewer question ("What was the bottleneck, and how did you reduce the latency?") stays one finalized question, not two — a natural mid-question pause no longer trips premature turn-splitting. A queued question's answer context is captured at the moment *that* question finalizes, so another question finalizing later while it waits never leaks into its prompt. A structured groundedness guard (`core/veya/conversation/groundedness.py`) catches a self-contradictory numeric claim (e.g. "35% to 35%") or a specific percentage unsupported by the real retrieved/memory/spoken context, and substitutes an honest "I don't have enough verified context" answer instead.
+Coding and system-design workspaces remain in the codebase, with versioned edits and exports. The active **Create Session flow is interview practice**; those workspaces are not additional validated product modes.
 
-### Current limitations
+## Architecture
 
-- The microphone-only flow cannot reliably identify speakers automatically; the candidate must use **I'm answering** when speaking. No diarization model is used or claimed.
-- Interviewer-turn scheduling is bounded: active answers are preserved and up to three later questions are queued rather than cancelling an answer. Queue overflow is shown explicitly.
-- Answer text is streamed through a clean-speech filter (`SpeakableAnswerStream`) that strips `<think>`/reasoning blocks and protocol labels before anything reaches Swift, and Ollama is asked to skip its reasoning pass outright (`think: false`, version-gated with a real fallback) when the connected Ollama instance supports it. Measured against the currently configured local model (`qwen3:1.7b`) on this machine: median first *usable* (clean, speakable) answer text was **0.25s**, p95 **3.63s** (the p95 outlier was model/Ollama warm-up on the first request of a run, not steady-state); median total completion was **4.43s**, p95 **7.35s**. These are real measurements from `core/scripts/benchmark_answer_latency.py`, not targets — re-run it locally to reproduce on your own hardware/model.
-- The groundedness guard is deliberately narrow (self-contradictory/unsupported percentages, matched against real context text) — it is not a general fact-checker and will not catch every possible fabrication.
-- Physical microphone, Zoom, Google Meet, and Teams capture have not yet been manually verified end-to-end.
-- The coding and system-design subsystems remain in the repository but are not part of the current Create Session product flow.
-
-## What's implemented
-
-### Core session & UI (Sections 1–6)
-- Session creation, live session view, overlay window, dashboard, previous-sessions history, personal profile, settings.
-- GRDB-backed persistence: `Session`, `SessionDocument`, `TranscriptSegment`, `DetectedQuestion`, `CopilotAnswer`, `UserProfile`, `SessionReport` (versioned migrations in `DatabaseManager`).
-- A versioned JSON Lines IPC protocol (`docs/IPC_PROTOCOL.md`) between Swift and the Python worker, with a bounded restart/health-check lifecycle (`PythonWorkerManager`) and a three-way fallback order (real transcription → Python mock feed → Swift fallback) so the app is never left with no active pipeline.
-- Presenter Privacy / Safe Share: a capture-compatibility tester, a screen-capture engine that excludes the overlay from what's shared, and a settings UI to configure it (`docs/PRESENTER_PRIVACY.md`).
-
-### Real transcription (Section 7)
-- `MicrophoneAudioCapture` (AVFoundation) streams mono 16kHz PCM chunks over IPC; the Python worker buffers them in a rolling window and transcribes with a local `whisper.cpp` CLI binary (`docs/REALTIME_TRANSCRIPTION.md`). No raw audio is ever persisted.
-
-### Question detection & answer generation (Section 8)
-- Local question detection + an `LLMProvider` abstraction backed by Ollama only. `OllamaProvider` enforces a **loopback-only** policy (`VEYA_OLLAMA_URL` must resolve to localhost unless `VEYA_OLLAMA_ALLOW_REMOTE=1` is explicitly set) — see `docs/QUESTION_AND_ANSWER_INTELLIGENCE.md`.
-
-### Document ingestion & grounded answers (Section 9)
-- `.txt/.md/.pdf/.docx` ingestion, chunking, local embeddings (Ollama), and a pure-Python cosine-similarity SQLite vector store — grounded answers cite real retrieved chunks, never fabricated sources (`docs/KNOWLEDGE_RETRIEVAL.md`).
-
-### Real-time turn detection & low-latency answering (Section 14)
-Replaces the old "judge every ~4s Whisper window independently" question detection, which failed on any question spoken across more than one window and couldn't recognize statement-form prompts like "Tell me about yourself."
-- **Local VAD** (`core/veya/transcription/turn_detection.py`): a chunk-level, energy-based (RMS amplitude) speech/silence state machine — `speech_started`/`speech_continuing`/`silence_candidate`/`turn_finalized` — running independently of and faster than Whisper's window cadence. Configurable silence duration (default 1.2s — long enough that a normal mid-sentence pause doesn't end a turn), a minimum speech duration before silence can finalize anything, and a max-turn-duration safety cap. A trailing open turn is force-finalized at session close so nothing spoken right at the end is dropped.
-- **`TurnAssembler`** (`core/veya/conversation/turn_assembler.py`): coalesces `transcript.final` fragments spanning multiple Whisper windows into one complete spoken turn, deduplicating window overlap the same way transcription already does, and only finalizes on a real endpoint (a VAD boundary, explicit session stop, or the max-duration cap) — never on an individual fragment.
-- **Two-stage semantic classification** (`core/veya/conversation/semantic_classifier.py`): a fast deterministic gate (extended to recognize statement-form prompts — "Tell me about yourself," "Walk me through your resume," "Q1, explain...") decides clear cases immediately; only genuinely ambiguous turns make a local Ollama call for structured JSON classification (`is_answer_request`/`confidence`/`normalized_question`/`reason_category`), safely parsed and validated, falling back to the deterministic gate's own verdict if Ollama is unavailable, slow, or returns malformed output — never crashes transcription.
-- Swift gets three new events (`turn.state`, `question.classifying`, `question.rejected`) driving a real six-state Live Session indicator — Listening / Transcribing / Waiting for speaker to finish / Understanding question / Generating answer / Local AI unavailable — plus a prominent answer panel (previously never rendered at all) with partial vs. finalized transcript shown separately, and a Check Local AI action. The floating overlay now defaults to a screen corner instead of dead-center on first launch, so it doesn't cover the main answer panel.
-- **Real streaming preview**: a short (default 2s) trailing window is re-transcribed roughly once a second while speech is ongoing, emitting real `transcript.partial` events from the real engine (not the mock feed) — never persisted, never fed into turn assembly or question detection, purely a live preview Swift replaces on the next partial or clears on the next `transcript.final` (`core/veya/transcription/session.py`).
-- **Mid-sentence interrogatives now reach the ambiguous band**: an earlier review found the deterministic gate's default scoring could only land on {0, 0.2, 0.6, 0.65, 0.75} — none of which fell inside the configured semantic-classification band `[0.35, 0.6)` — so real ambiguous prompts were always decided by the heuristic gate and never actually reached Ollama. A new mid-sentence-interrogative signal (an interrogative word present but not leading, e.g. "the caching layer, how does that scale") now scores in-band without double-counting when the sentence also leads with an interrogative.
-- **Honest, multi-leg latency measurements** (previously a single number that implicitly excluded real audio→transcript latency — withdrawn):
-  - Real audio → first `transcript.partial`: **~955ms** (real `jfk.wav` sample through real `whisper.cpp`, real-time chunk pacing, `core/tests/test_realtime_pipeline_latency_smoke.py`).
-  - Real audio → first `transcript.final`: **~3958ms** — the dominant cost, bounded below by the ~4s Whisper rolling-window size itself; a VAD turn boundary can fire earlier (e.g. ~1.5s) but the transcript text for that turn does not exist until the window completes.
-  - Finalized turn → `question.detected`: **~0.2ms** — pure local computation, but this leg only starts once a transcript exists, so it is dwarfed by the audio→transcript leg above; text is injected directly in this measurement, not spoken (`core/tests/test_ollama_smoke.py`).
-  - `question.detected` → first `answer.speakable_delta`: **~2.0s** at the time of this measurement (real local Ollama generation, `qwen3:1.7b`) — since superseded by the `think:false`/clean-stream work below; see "Current limitations" for current numbers.
-  - All figures measured on this development machine; environment/hardware-specific, not a benchmark claim. **End-to-end microphone → first answer content is dominated by the ~4s transcription window, not by classification or generation** — "real-time / low-latency" should be read as "faster turn *boundary* detection than before," not as sub-second answer latency.
-- **Known limitation, not fixed**: there is no diarization or speaker-role model. VAD is energy-based (speech/silence only) and cannot tell the interviewer's speech from the candidate's own speech — Veya can still attempt to answer the candidate's own speech if it resembles a prompt. This is an acknowledged gap, not a silent one.
-
-### Coding Copilot (Section 11)
-- Python owns versioned coding-workspace state (`core/veya/coding/workspace.py`): every file has a version and a bounded follow-up history that survives edits/applies.
-- RPCs: `coding.list_files`, `coding.upsert_file`, `coding.apply_edits`, `coding.followup`, `coding.debug`, `coding.generate_tests`, `coding.explain`, `coding.analyze`, `coding.run`.
-- Every LLM proposal returns `base_version`, an explanation, minimal non-overlapping edits, proposed tests, and a complexity estimate. Swift renders a diff preview with explicit **Apply / Reject / Regenerate** actions; rejecting never mutates the workspace, and applying against a stale version is safely rejected.
-- Local execution (`coding.run`) is opt-in (`VEYA_CODE_EXECUTION_ENABLED=1`), time- and output-bounded, runs in an isolated temp directory with an empty environment, never invokes a shell, and is explicitly documented as *not* a security sandbox.
-
-### System Design Copilot (Section 12)
-- Python owns durable `ArchitectureState` (nodes, edges, decisions, assumptions, requirements, risks, trade-offs, action items) per session, versioned the same way as coding workspaces.
-- RPCs: `design.get`, `design.replace`, `design.followup` (LLM-evolves state in place — untouched nodes/decisions survive), `design.export` (Mermaid / JSON / Markdown / PDF — the PDF is a small hand-rolled generator, no third-party dependency). JSON is authoritative; every other format is a derived export.
-- Swift renders an editable node/edge graph and an export UI.
-
-### Session Reports & Durable Memory (Section 13)
-- `session.analyze` synthesizes a report (summary, topics, decisions, action items, unanswered questions, preparation gaps) from transcript/question/answer data Swift sends narrowly for that one call. The report is saved durably in Python (`ReportStore`, JSON-per-session under `~/Library/Application Support/Veya/SessionReports/`) *and* persisted by Swift/GRDB — `session.report.get` survives a full worker-process restart, verified with a real-subprocess test that stops one worker and fetches the report from a completely independent second worker process.
-- Durable, user-approved memory (`core/veya/memory/store.py`, local SQLite under the managed application-support root, never remote): candidates are proposed (never silently saved) by `session.analyze`, require explicit `memory.approve`/`memory.reject`, and only approved memory is retrievable in future sessions' prompts. Swift's `MemoryReviewView` (Settings → Memory) is the approve/reject/edit/delete UI.
-
-### Packaging
-- `packaging/build_app.sh` builds an actual unsigned, installable `Veya.app`: a release Swift binary, a bundled Python venv with `pypdf` installed, and a copy of the `core/veya` worker package. `PythonWorkerConfiguration` resolves the bundled runtime from `Bundle.main` at launch (falling back to `/usr/bin/env python3` + a checkout-relative path only in dev), so the packaged app never depends on the end user's own Python install. `VEYA_PYTHON_EXECUTABLE`/`VEYA_WORKER_DIRECTORY` still override both for development.
-- **First-launch Whisper model manager** (`WhisperModelManager`): downloads the configured model over HTTPS, verifies its SHA-256 before it's ever trusted, writes atomically (temp file + rename), never re-downloads a valid cached model, and re-downloads rather than trusts a corrupted cache. The manifest (`packaging/whisper_model_manifest.json`) is a real per-architecture (arm64/x86_64) dictionary — Apple Silicon and Intel resolve to genuinely different models — and has no hard-coded/guessed hash anywhere: every value was produced by actually downloading the referenced release asset and hashing it with `shasum -a 256`. Verified for real: a clean launch of the packaged app downloaded the real model over HTTPS, verified its hash, and the exact downloaded file was fed to `whisper-cli` and produced a correct transcript of the JFK sample.
-
-### Local AI status, session deletion, and transcript cleanliness
-A round of hands-on GUI testing surfaced product-level gaps real subprocess/unit tests alone didn't catch — fixed:
-- **Local AI status panel** (Settings → Local AI): a new `system.llm_status` RPC reports whether Ollama is reachable, which model is configured, whether that exact model is installed, and what is — with actionable repair text (e.g. `ollama pull <model>`) instead of a silent "No local LLM was available." The configured model is now a Settings-level choice (`LocalAIPreferencesStore`), applied to the worker immediately via a restart, rather than a hard-coded default with no way to change it from the app.
-- **Session deletion**: Previous Sessions now has a delete action with a confirmation dialog. It calls a new `session.delete_data` RPC that cleans up every Python-owned artifact for that session (coding workspace, architecture state, knowledge-index documents/chunks, never-approved memory candidates, cached report — approved memory deliberately outlives the session it came from), removes the on-disk document copies, then deletes the GRDB `Session` row, which cascades to every related table.
-- **Transcript cleanliness**: whisper.cpp's non-speech tags (`[BLANK_AUDIO]`, `(silence)`, etc.) are now filtered at the transcription source in Python — they're never emitted as a `transcript.final` event — and Previous Sessions also filters them at display time, so sessions transcribed before this fix don't still show raw tags.
-
-## Repository layout
-
-```
-Sources/Veya/          Swift app (SwiftUI + AppKit hosting, GRDB persistence, IPC bridge)
-Tests/VeyaTests/        Swift unit + real-subprocess integration tests (swift-testing)
-core/veya/               Python worker: transcription, LLM, knowledge/RAG, coding, design, memory, IPC dispatcher
-core/tests/               Python unit tests (unittest)
-docs/                     Design/behavior docs for each subsystem (IPC protocol, privacy, packaging, etc.)
-packaging/                .app build script, Info.plist, Whisper model manifest
+```mermaid
+flowchart LR
+    A[Microphone or opted-in meeting audio] --> B[Local whisper.cpp]
+    T[Typed question] --> C[Turn and question orchestration]
+    B --> C
+    D[Resume / job description] --> E[Local extraction and chunking]
+    E --> F[Ollama embeddings + SQLite index]
+    F --> C
+    M[Approved personal memory] --> C
+    C --> G{Selected inference backend}
+    G --> L[Local Ollama]
+    G --> R[Loopback SSH tunnel to vLLM]
+    L --> H[Clean streamed answer events]
+    R --> H
+    H --> U[SwiftUI answer panel]
+    U --> S[GRDB session history]
 ```
 
-## Building & running (development)
+Swift owns the source-of-truth session, transcript, question, answer, and profile records. A managed Python subprocess owns inference, transcription, retrieval indexes, and derived caches. Communication uses versioned JSON Lines over private stdin/stdout. Worker health checks, bounded restarts, ordered answer scheduling, and session teardown keep failures explicit.
+
+## Verified results — November 20, 2026
+
+| Check | Result |
+|---|---|
+| Python regression suite | **484 tests discovered: 480 passed, 4 opt-in tests skipped** |
+| Swift regression suite | **228 passed** across 30 suites |
+| Combined executed tests | **708 passed** |
+| Native application UI | All four New Session fields accepted keyboard input; valid input enabled creation; a diagnostic session displayed a GPU answer and ended successfully |
+| Signed development bundle | Release build and deep/strict signature verification passed, including verification after real worker execution |
+| Packaged typed question + long synthetic context | GPT-OSS 120B: **2.048 s** to first usable text; **2.912 s** to answer completion |
+| Packaged meeting-track audio replay, no microphone track | GPT-OSS 120B + streaming ASR: **10.544 s** to first usable text; **11.359 s** to answer completion |
+
+Timing rows are **single synthetic acceptance samples**, not medians, p95s, or guarantees. Typed timing starts at submission; replay timing includes session/ASR startup and paced input, so these rows are not directly comparable. The replay check does not exercise ScreenCaptureKit or a real meeting platform. Machine-readable reports: [typed](docs/results/typed-acceptance.json), [meeting-track replay](docs/results/meeting-track-acceptance.json).
+
+These checks establish functioning integrations and specific fixture assertions. They do **not** establish an answer-accuracy percentage or a measured improvement over the earlier local model.
+
+## What improved in this iteration
+
+| Earlier behavior | Current behavior |
+|---|---|
+| Answer generation assumed local Ollama | Selectable Ollama or tunneled Responses backend, tested with GPT-OSS 120B and a separately served Qwen model |
+| A changed served model could cause stale model requests | Single-model discovery when no explicit override is set; explicit overrides remain strict and configurable |
+| Only the first 240 characters of a retrieved passage reached generation | Bounded full passages, up to 800 characters each, reach the prompt; short excerpts remain display metadata |
+| Larger prompts could be rejected by a byte approximation | Larger prompts use vLLM's tokenizer within the configured budget, with room reserved for output and template overhead |
+| New Session editing and disabled creation were confusing | Native editable fields, visible validation, duplicate-submit protection, first-document resume labeling, and attachment removal |
+| A stale overlay frame could cover the main window | Restored frames are bounded; the overlay hides while Veya is active and has a hide control |
+| Meeting capture depended on an active microphone track | Meeting-only transcription can share a typed-session orchestrator |
+| Permission checks relied solely on a legacy preflight | Explicit permission request/re-check and authorization through ScreenCaptureKit |
+| Failures could appear as a generic local-model error | Safe backend-specific errors preserve the failed question for retry |
+| Development app identity was only linker-signed | Full ad-hoc bundle/helper signing, sealed resources, and no worker bytecode writes inside the signed bundle |
+
+## Development setup
+
+Requirements: macOS 14+, Swift 6 toolchain, Python 3.10+, Git, CMake for Whisper, and Ollama for local document embeddings. The verified workstation used Apple Silicon and Python 3.14.6. Automated Python CI targets 3.12 and 3.14; macOS CI builds and tests Swift.
 
 ```sh
-# Python worker environment
-python3 -m pip install --break-system-packages -e 'core[dev]'
-python3 -m unittest discover -s core/tests -t core
-
-# Swift app
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e core
+ollama pull nomic-embed-text
+# For local answer generation, also install the worker's default model:
+ollama pull llama3.2
 swift build
-./run-tests.sh          # swift test, with the flags this toolchain needs for swift-testing
-swift run Veya
+sh run-tests.sh
 ```
 
-The dev-time worker launches via `/usr/bin/env python3 -m veya` with `core/` as its working directory — no packaging step is required to develop against it. Real local integrations (Whisper, Ollama) are picked up automatically when configured:
+Keep Ollama running. `swift run Veya` is useful for UI development; use a packaged app for microphone/ScreenCaptureKit permission testing.
 
-- `VEYA_WHISPER_BIN` / `VEYA_WHISPER_MODEL` — a local `whisper.cpp` CLI binary + model for real transcription.
-- `VEYA_OLLAMA_URL` / `VEYA_OLLAMA_MODEL` — a local Ollama instance for real question answering, coding/design assistance, and report synthesis. Must be loopback unless `VEYA_OLLAMA_ALLOW_REMOTE=1` is set.
+### Build local speech recognition
 
-Without either configured, the app still runs end-to-end using the Swift/Python mock pipeline.
-
-## Building an installable app
+The external whisper.cpp checkout is intentionally ignored by Git. This revision was used for the recorded checks:
 
 ```sh
-packaging/build_app.sh
-open .build/package/Veya.app     # or right-click > Open — it's unsigned
+git clone https://github.com/ggml-org/whisper.cpp.git whisper.cpp
+git -C whisper.cpp checkout 5eaee0cc9024eb9e9a99469199920c8b7f5cb9ec
+sh packaging/install_streaming_asr_source.sh
+cmake -S whisper.cpp -B whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DWHISPER_BUILD_TESTS=OFF
+cmake --build whisper.cpp/build --target whisper-cli whisper-stream-stdin -j 4
 ```
 
-## Privacy & security posture
+The packaged app downloads the architecture-specific model in `packaging/whisper_model_manifest.json`, checks its SHA-256, and caches it under `~/Library/Application Support/Veya/Models`. No model weights are committed.
 
-- No cloud APIs: transcription, embeddings, and generation are all local; Ollama access is loopback-restricted by default.
-- Swift/GRDB is the sole persistence authority for session, transcript, question, and answer data; Python only ever sees narrowly-scoped copies for one RPC call and owns only its own derived data (transcription output, the knowledge index, coding/design workspace state, durable approved memory).
-- Worker stderr is metadata-only (message type/byte counts) — never transcript, prompt, model output, or document content. This is enforced in code (e.g. suppressing a third-party PDF parser's own loggers) and covered by regression tests, not just policy.
-- Document/model paths are always validated to resolve beneath an app-managed directory — never an arbitrary user-supplied path.
-- Local code execution is opt-in, bounded, and explicitly not a sandbox.
-- See `docs/SECURITY_AND_PRIVACY.md`, `docs/PRESENTER_PRIVACY.md`, and `docs/IPC_PROTOCOL.md` for the full detail behind each of these.
+### Build and open the app
 
-## Testing
+Quit Veya before rebuilding. By default, packaging stages outside Desktop/iCloud-synced source directories to avoid Finder metadata interfering with signing:
 
-- **Python**: 465 tests, with no `ResourceWarning`s under `-W error::ResourceWarning`; four opt-in real-model/manual suites are skipped by default.
-- **Swift**: 223 tests across the Swift test suites.
-- The suite covers IPC, transcription lifecycle, answer queueing/failure preservation, document-readiness gating, memory, reports, and real-worker subprocess flows. It does **not** substitute for physical microphone or meeting-platform acceptance testing.
-- Run the checks with:
+```sh
+sh packaging/build_app.sh
+open "$HOME/Library/Caches/Veya/LocalBuild/Veya.app"
+```
+
+You can copy the verified bundle into `~/Applications/Veya.app` for normal use. Use the same installed copy when granting microphone and Screen & System Audio Recording permission. macOS may request authorization again after a development rebuild. `VEYA_CODESIGN_IDENTITY` can select a signing identity; the default is ad-hoc signing, **not notarization**.
+
+The bundled Python environment is development-machine-dependent; it is not a fully relocatable Python distribution. A clean-machine, portable installer remains roadmap work.
+
+### Use the rented GPU
+
+Keep your existing SSH tunnel forwarding **Mac `127.0.0.1:18000` → remote `127.0.0.1:18000`** running, then verify:
+
+```sh
+curl --fail http://127.0.0.1:18000/v1/models
+```
+
+In Veya: **Settings → AI Backend → Vast GPU via SSH → Use This Backend**. Select the served model or use automatic discovery. The default client context budget is 8,192 tokens with 1,024 output tokens; a larger verified server window can be configured explicitly.
+
+A refused connection means the local tunnel listener is absent; it is independent of macOS capture permissions. Veya does not create tunnels or modify GPU instances. See [GPU setup and troubleshooting](docs/GPU_INFERENCE.md). The optional workstation Codex profile is separate from Veya and is not installed by cloning this repository.
+
+### Use a session
+
+1. Enter a title and attach a resume, or explicitly choose **Start without resume**.
+2. Wait for required documents to finish indexing, then start the session.
+3. Type a question and choose **Ask**, or grant microphone access for spoken input.
+4. For meeting input, enable Veya in **Privacy & Security → Screen & System Audio Recording**, select the meeting application/browser, and start meeting audio. If permission was already enabled, use **Re-check permission**; macOS may require reopening the app.
+
+Microphone-only mode cannot identify speakers automatically. Use **I'm answering** while you speak. Meeting-audio attribution is track-based, not neural speaker diarization.
+
+## Validation and reproducibility
 
 ```sh
 python3 -W error::ResourceWarning -m unittest discover -s core/tests
-swift build
-./run-tests.sh
-packaging/build_app.sh
+sh run-tests.sh
+sh packaging/build_app.sh
 ```
+
+Real-model checks are opt-in and require the tunnel plus local Ollama embeddings:
+
+```sh
+python3 core/scripts/smoke_gpu.py --long-context --json-report /tmp/typed-result.json
+```
+
+For speech/meeting-track replay commands, fixture details, and measurement boundaries, see [validation](docs/VALIDATION.md). GitHub Actions runs isolated Python and macOS Swift tests without GPU credentials or model downloads.
+
+## Limits and next improvements
+
+1. **Live-platform acceptance:** test Zoom and browser-based Google Meet with real calls, app-specific capture, permission changes, device switches, and long sessions. This is still unverified.
+2. **Answer quality:** build a labeled held-out evaluation set; measure retrieval Recall@k/MRR, factual support, abstention, ASR word error rate, and question-detection precision/recall. Calibrate human-reviewed judgments before claiming accuracy gains.
+3. **Grounding during streaming:** the current narrow guard runs after generation and cannot retract text already shown. Add evidence-linked claim verification or sentence-level buffering and measure the latency trade-off.
+4. **Retrieval:** compare the cosine baseline with sentence-aware chunking, lexical/vector fusion, and reranking. Version embedding/index metadata before supporting model migration.
+5. **Performance:** benchmark cold/warm p50/p95 end-of-question-to-render latency across hardware, noise conditions, and models; add soak tests for cancellation and backpressure.
+6. **Distribution:** build a relocatable Python runtime, repeat clean-machine tests, sign/notarize a release, and choose a project distribution license. No public production release is claimed here.
+
+## Repository guide
+
+- `Sources/Veya/` — SwiftUI/AppKit app, capture, IPC bridge, GRDB persistence.
+- `core/veya/` — Python transcription, retrieval, inference, conversation, memory, and workspace services.
+- `Tests/VeyaTests/`, `core/tests/` — unit and subprocess integration tests.
+- `packaging/` — app builder, model manifest, reproducible streaming ASR target.
+- `docs/` — [validation](docs/VALIDATION.md), [GPU integration](docs/GPU_INFERENCE.md), [IPC](docs/IPC_PROTOCOL.md), [security/privacy](docs/SECURITY_AND_PRIVACY.md), and subsystem design notes.
+- [Architecture](ARCHITECTURE.md) and [implementation history](IMPLEMENTATION_PLAN.md).
+- [Resume bullets and claim boundaries](docs/RESUME.md).

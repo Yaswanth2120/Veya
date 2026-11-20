@@ -32,8 +32,8 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Local AI") {
-                    Button("Status & Model…") {
+                Section("AI Backend") {
+                    Button("Backend, Status & Model…") {
                         coordinator.route = .localAIStatus
                     }
                 }

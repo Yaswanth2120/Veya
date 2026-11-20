@@ -86,6 +86,12 @@ final class OverlayWindowController: NSWindowController {
             }
         }
 
+        if let visibleFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
+            panel.setFrame(OverlayCornerPositioning.repairedFrame(panel.frame, preferredSize: initialSize, in: visibleFrame), display: false)
+        }
+        panel.minSize = NSSize(width: 300, height: 150)
+        panel.maxSize = NSSize(width: 640, height: 520)
+
         let rootView = OverlayView(conversationState: conversationState, privacyManager: privacyManager, controller: self)
         panel.contentView = NSHostingView(rootView: rootView)
     }

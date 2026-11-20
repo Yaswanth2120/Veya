@@ -68,6 +68,8 @@ final class PresenterPrivacyManager: ObservableObject {
     func selectMode(_ mode: PresenterPrivacyMode) async {
         guard preferences.selectedMode != mode else { return }
         preferences.selectedMode = mode
+        status = preferences.enabled ? .notTested : .disabled
+        lastTestResult = nil
         persist()
         PrivacyLog.info("privacy mode changed to \(mode.rawValue)")
         applyWindowSharingPolicy()
@@ -112,18 +114,9 @@ final class PresenterPrivacyManager: ObservableObject {
             window.sharingType = .none
             PrivacyLog.info("direct privacy configured (best-effort)")
         case .normal, .safeShare:
-            // Best-effort restore. Verified empirically: once an NSWindow's
-            // sharingType has been set to .none, AppKit does not honor
-            // setting it back to .readOnly on that *same* window instance
-            // — the window server treats .none as sticky. This call is
-            // still correct and takes effect for windows that never had
-            // .none applied (e.g. Normal → Safe Share). For a window that
-            // *did* have Direct Private Overlay applied, it stays excluded
-            // from sharing until a new overlay window is created (Veya
-            // creates a fresh one per Live Session), which arguably fails
-            // safe rather than silently un-hiding a window the user
-            // previously marked private. See docs/PRESENTER_PRIVACY.md
-            // "Known limitations."
+            // Request normal sharing when leaving direct-private mode.
+            // AppKit read-back/capture behavior varies by macOS version;
+            // neither setting nor reading this flag proves exclusion.
             window.sharingType = .readOnly
         }
     }

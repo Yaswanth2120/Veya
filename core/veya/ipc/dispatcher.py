@@ -14,11 +14,13 @@ import base64
 import binascii
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, Union
 
 from .errors import ErrorCode, ProtocolError
+from . import events
 from .protocol import PROTOCOL_VERSION, Request
 from ..transcription.engine import TranscriptionEngine, TranscriptionSetupError, default_whisper_engine_factory
 from ..transcription.session import TranscriptionSession
@@ -32,7 +34,7 @@ from ..knowledge.models import IngestionStatus
 from ..knowledge.retrieval import KnowledgeRetriever, chunk_sources
 from ..knowledge.vector_store import VectorStore
 from ..llm.errors import LLMUnavailableError
-from ..llm.ollama_provider import default_ollama_provider_factory
+from ..llm.factory import default_llm_provider_factory
 from ..llm.provider import LLMProvider
 from ..coding.analysis import analyze_python
 from ..coding.execution import run_python
@@ -119,7 +121,7 @@ class WorkerContext:
         default=default_whisper_engine_factory
     )
     session_context: SessionContext = field(default_factory=SessionContext)
-    llm_provider_factory: Callable[[], LLMProvider] = field(default=default_ollama_provider_factory)
+    llm_provider_factory: Callable[[], LLMProvider] = field(default=default_llm_provider_factory)
     conversation_orchestrator: Optional[ConversationOrchestrator] = None
 
     # Section 9 — knowledge/document ingestion + retrieval.
@@ -336,6 +338,40 @@ async def _handle_session_start(params: dict, context: WorkerContext) -> dict:
     return {"ok": True}
 
 
+async def _handle_conversation_start_text(params: dict, context: WorkerContext) -> dict:
+    session_id = params.get("session_id")
+    if not isinstance(session_id, str) or context.active_session_id != session_id:
+        raise ProtocolError(ErrorCode.SESSION_NOT_FOUND, "No matching active session.")
+    if context.conversation_orchestrator is None:
+        try:
+            provider = context.llm_provider_factory()
+            await provider.check_availability()
+        except LLMUnavailableError as exc:
+            raise ProtocolError("LLM_UNAVAILABLE", exc.reason) from exc
+        context.conversation_orchestrator = ConversationOrchestrator(
+            session_id=session_id, session_context=context.session_context,
+            emit_event=context.emit_event, llm_provider=provider,
+            retriever=_get_or_create_retriever(context),
+            memory_texts=_get_or_create_memory_store(context).approved_texts(),
+            emit_timing_diagnostics=os.environ.get("VEYA_ANSWER_TIMING_DIAGNOSTICS") == "1",
+        )
+    await context.cancel_feed_task_if_running()
+    return {"ok": True}
+
+
+async def _handle_answer_ask(params: dict, context: WorkerContext) -> dict:
+    text = params.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > 4000:
+        raise ProtocolError(ErrorCode.INVALID_PARAMS, "Question must contain 1–4000 characters.")
+    await _handle_conversation_start_text(params, context)
+    question_id = str(uuid.uuid4())
+    text = text.strip()
+    await context.emit_event("question.detected", events.question_detected(
+        session_id=context.active_session_id, question_id=question_id, text=text))
+    await context.conversation_orchestrator.answer_typed_question(question_id, text)
+    return {"ok": True}
+
+
 async def _handle_session_stop(params: dict, context: WorkerContext) -> dict:
     session_id = params.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -520,17 +556,16 @@ async def _handle_transcription_start(params: dict, context: WorkerContext) -> d
 
 async def _handle_transcription_start_meeting_audio(params: dict, context: WorkerContext) -> dict:
     """Section 16: starts the separated meeting/system-audio track —
-    always the interviewer channel. Requires the microphone track
-    (`transcription.start`) to already be running, since it shares that
-    track's `ConversationOrchestrator` rather than creating a second,
-    disconnected conversation."""
+    always the interviewer channel. Requires an initialized conversation
+    orchestrator (from transcription or typed input), not an active
+    microphone track."""
     session_id = params.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         raise ProtocolError(ErrorCode.INVALID_PARAMS, "'session_id' is required and must be a string.")
     if context.active_session_id != session_id:
         raise ProtocolError(ErrorCode.SESSION_NOT_FOUND, f"No active session with id {session_id!r}.")
-    if context.transcription_session is None or context.conversation_orchestrator is None:
-        raise ProtocolError(ErrorCode.NOT_RUNNING, "The microphone track must be started (transcription.start) before the meeting-audio track.")
+    if context.conversation_orchestrator is None:
+        raise ProtocolError(ErrorCode.NOT_RUNNING, "Start a conversation before the meeting-audio track.")
     if context.meeting_audio_session is not None:
         raise ProtocolError(ErrorCode.ALREADY_RUNNING, "A meeting-audio transcription session is already running for this worker.")
 
@@ -560,7 +595,8 @@ async def _handle_transcription_start_meeting_audio(params: dict, context: Worke
     # The microphone track was constructed before we knew separated-track
     # mode was active, so its wire-tagged source is still "mixed" — flip
     # it to "microphone" now that the meeting-audio track is genuinely up.
-    context.transcription_session.set_source("microphone")
+    if context.transcription_session is not None:
+        context.transcription_session.set_source("microphone")
 
     logger.info("transcription.start_meeting_audio session_id=%s sample_rate_hz=%s asr_provider=%s", session_id, sample_rate_hz, asr_provider)
     return {"ok": True, "asr_provider": asr_provider}
@@ -1086,6 +1122,8 @@ _HANDLERS: dict[str, Handler] = {
     "transcription.meeting_audio_chunk": _handle_transcription_meeting_audio_chunk,
     "transcription.stop_meeting_audio": _handle_transcription_stop_meeting_audio,
     "conversation.set_user_speaking": _handle_conversation_set_user_speaking,
+    "conversation.start_text": _handle_conversation_start_text,
+    "answer.ask": _handle_answer_ask,
     "answer.cancel": _handle_answer_cancel,
     "answer.skip": _handle_answer_skip,
     "answer.retry": _handle_answer_retry,

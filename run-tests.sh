@@ -15,6 +15,10 @@ set -e
 
 TESTING_FRAMEWORKS="/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
 
+if [ ! -d "$TESTING_FRAMEWORKS/Testing.framework" ]; then
+  exec swift test "$@"
+fi
+
 swift test \
   -Xswiftc -F -Xswiftc "$TESTING_FRAMEWORKS" \
   -Xswiftc -Xfrontend -Xswiftc -disable-cross-import-overlays \

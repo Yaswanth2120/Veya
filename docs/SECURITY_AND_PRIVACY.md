@@ -3,10 +3,17 @@
 Veya is a native Swift macOS host with a local Python worker. The host sends
 microphone PCM and session metadata to the worker over private JSON Lines
 stdin/stdout. The worker returns transcript, question, answer, and document
-source events only to that host process. No component intentionally uploads
-audio, documents, prompts, or answers.
+source events only to that host process. Local Ollama mode keeps inference
+on this Mac. Explicitly selected Vast GPU mode sends questions and selected
+document, memory, and conversation text through the loopback SSH tunnel to
+the rented server. Raw audio is never uploaded. Remote retention is outside
+Veya's control. See `GPU_INFERENCE.md` for configuration and limitations.
 
 ## Local-only boundaries
+
+- The optional GPU provider accepts only loopback HTTP `/v1` endpoints,
+  rejects redirects, ignores environment proxies, and requests
+  `store: false`. It never manages SSH keys, tunnels, or remote startup.
 
 - Ollama chat and embedding URLs must be loopback (`localhost`, `127.*`, or
   `::1`) by default. A non-loopback `VEYA_OLLAMA_URL` is rejected unless the

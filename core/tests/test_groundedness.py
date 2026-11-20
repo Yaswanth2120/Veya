@@ -47,3 +47,7 @@ class CheckAnswerGroundednessTests(unittest.TestCase):
     def test_empty_answer_text_is_trivially_grounded(self):
         result = check_answer_groundedness("", "")
         self.assertTrue(result.is_grounded)
+
+    def test_unicode_space_before_percentage_is_equivalent(self):
+        self.assertTrue(check_answer_groundedness("We saved 35\u202f%.", "Saved 35%.").is_grounded)
+        self.assertFalse(check_answer_groundedness("We saved 42\u202f%.", "Saved 35%.").is_grounded)
