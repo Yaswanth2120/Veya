@@ -814,6 +814,10 @@ class _ScreenshotPhrasesEngine:
         ])
 
     def transcribe_pcm(self, pcm_s16le: bytes, sample_rate_hz: int) -> str:
+        # Partial recognition runs concurrently with final-window recognition.
+        # Do not let a short partial consume a scripted final-window phrase.
+        if len(pcm_s16le) < 4 * sample_rate_hz * 2:
+            return ""
         return next(self._responses, "")
 
 
