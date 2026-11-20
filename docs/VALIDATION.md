@@ -74,9 +74,13 @@ The running app was exercised through macOS accessibility controls:
 - A named diagnostic session accepted a typed question, displayed a GPU-generated answer without a failure banner, ended, and returned to New Session.
 - The previous 1,025-point restored overlay frame is covered by a geometry regression test and is repaired to a bounded frame.
 
+## Owner-reported live meeting checks
+
+On November 20, 2026, the project owner confirmed that live Zoom and Google Meet are working after manual testing. This establishes successful operation in the owner's tested setup. Platform versions, call duration, and a detailed capture checklist were not recorded; the synthetic replay timings above remain separate measurements.
+
 ## Not yet established
 
-- Live Zoom/Google Meet/Teams capture reliability or app-filter correctness.
+- Reliability across Zoom/Google Meet versions, permission changes, device switches, long calls, or app-filter configurations; Teams operation has not been reported.
 - Successful physical microphone capture after every device/permission change.
 - General answer accuracy, hallucination rate, retrieval Recall@k, ASR WER, or speaker diarization quality.
 - A fair local-versus-GPU speed comparison or sustained-load latency percentiles.

@@ -62,8 +62,9 @@ When Whisper is unavailable in GPU mode, a live session remains usable with
 the typed question field instead of producing mock answers. Allow macOS
 microphone access for spoken input. Meeting audio still requires per-session
 opt-in and Screen Recording permission; it can run without microphone
-capture once the conversation is initialized. Physical microphone and meeting-app
-capture require manual acceptance testing.
+capture once the conversation is initialized. The project owner confirmed live
+Zoom and Google Meet operation on November 20, 2026; expanded device, permission,
+and long-call coverage remains future work. See [validation](VALIDATION.md).
 
 ## Context and failure limits
 

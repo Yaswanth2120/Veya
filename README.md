@@ -6,7 +6,7 @@ A native macOS interview-practice assistant that turns spoken or typed questions
 
 Veya supports local Ollama generation or an explicitly selected rented GPU through an SSH tunnel. Raw audio, document embeddings, and session storage remain on the Mac. GPU mode sends questions and selected document, memory, and conversation text to the remote server.
 
-**Status:** working local development prototype. Core pipelines, native form editing, and GPU-backed answer display have been exercised. Live Zoom/Google Meet capture, broad answer-quality evaluation, and a portable notarized release remain future validation work. See [validation evidence](docs/VALIDATION.md).
+**Status:** working local development prototype. Core pipelines, native form editing, and GPU-backed answer display have been exercised. The project owner confirmed live Zoom and Google Meet operation on November 20, 2026. Broad answer-quality evaluation and a portable notarized release remain future work. See [validation evidence](docs/VALIDATION.md).
 
 ## What it does
 
@@ -157,7 +157,7 @@ For speech/meeting-track replay commands, fixture details, and measurement bound
 
 ## Limits and next improvements
 
-1. **Live-platform acceptance:** test Zoom and browser-based Google Meet with real calls, app-specific capture, permission changes, device switches, and long sessions. This is still unverified.
+1. **Expanded live-platform coverage:** live Zoom and Google Meet operation is confirmed by the project owner. Extend coverage to permission changes, device switches, app-filter correctness, and long sessions; record platform versions and repeatable results.
 2. **Answer quality:** build a labeled held-out evaluation set; measure retrieval Recall@k/MRR, factual support, abstention, ASR word error rate, and question-detection precision/recall. Calibrate human-reviewed judgments before claiming accuracy gains.
 3. **Grounding during streaming:** the current narrow guard runs after generation and cannot retract text already shown. Add evidence-linked claim verification or sentence-level buffering and measure the latency trade-off.
 4. **Retrieval:** compare the cosine baseline with sentence-aware chunking, lexical/vector fusion, and reranking. Version embedding/index metadata before supporting model migration.

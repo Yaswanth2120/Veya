@@ -12,6 +12,10 @@ Use two or three bullets, matched to the role. These describe implemented and te
 
 - Implemented session-scoped RAG with local embeddings and SQLite cosine retrieval, fixed evidence loss between indexed chunks and answer prompts, and added source metadata, context-budget checks, and regression coverage.
 
+## Live meeting alternative
+
+- Integrated opted-in macOS system-audio capture with local transcription and GPU-backed answer generation; manually verified live operation with Zoom and Google Meet.
+
 ## Claims to avoid
 
 Do not claim a numerical accuracy gain, hallucination-free answers, production scale, live Zoom/Meet certification, full automatic speaker identification, or a portable notarized release. Those have not been established. The 708 passing tests exclude four opt-in skipped tests. GPU smoke timings are individual synthetic samples, not representative benchmarks or a measured speedup.
